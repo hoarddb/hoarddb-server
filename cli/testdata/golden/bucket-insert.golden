@@ -1,0 +1,14 @@
+> db.Users.insert({"_id_": "u3", "n": 3})
+OK  id=u3
+> db.Users.insert({"n": 4})
+OK  id=<ID>
+> db.Users.upsert({"_id_": "u3", "n": 30})
+OK  id=u3
+> db.Users.insert({"_id_": "u3", "n": 31})
+Error: insert failed: server error (18): Document "u3" already exists in bucket "Users" (database "app"). To replace it, run db.Users.upsert({_id_: "u3", ...}); to change some fields, run db.Users.update("u3", {$set: {...}}). If you are retrying an insert whose answer you did not get, it may have been stored: retry with upsert.
+> db.Users.find("u3")
+{"_id_": "u3", "n": 30}
+> db.Jobs.insert({"a": 1})
+OK  id=<ID>
+> db.Users.insert(
+Error: parse: parse args: expected parentheses, got: (

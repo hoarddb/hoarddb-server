@@ -1,0 +1,6 @@
+> disable user bob
+user "bob" altered (config version 3)
+> enable user bob
+user "bob" altered (config version 4)
+> disable user nobody
+Error: user "nobody" not found; run 'user list' to see the users

@@ -1,0 +1,60 @@
+> restore --dry-run --dir <OUT-DIR>/d1
+warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) in this dump have no payload bytes to restore — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+  app/Emails: would merge into existing bucket app/Emails (type hash)
+  app/Events: would merge into existing bucket app/Events (type btree)
+  app/Files: would merge into existing bucket app/Files (type blob)
+  app/Jobs: would merge into existing bucket app/Jobs (type fifo)
+  app/Post: would merge into existing bucket app/Post (type hash)
+  app/Tasks: would merge into existing bucket app/Tasks (type heap)
+  app/Users: would merge into existing bucket app/Users (type hash)
+restore --dry-run: 1 database(s), 7 bucket(s), 0 document(s) applied, 0 skipped
+  warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) in this dump have no payload bytes to restore — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+> restore --drop --dir <OUT-DIR>/d1
+warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) in this dump have no payload bytes to restore — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+restoring app/Emails (1 document(s))...
+  app/Emails: 1 applied, 0 skipped
+restoring app/Events (1 document(s))...
+  app/Events: 1 applied, 0 skipped
+restoring app/Jobs (1 document(s))...
+  app/Jobs: 1 applied, 0 skipped
+restoring app/Post (1 document(s))...
+  app/Post: 1 applied, 0 skipped
+  app/Post store fields: 2 element(s) applied, 0 skipped
+restoring app/Tasks (1 document(s))...
+  app/Tasks: 1 applied, 0 skipped
+restoring app/Users (2 document(s))...
+  app/Users: 2 applied, 0 skipped
+restore: 1 database(s), 6 bucket(s), 7 document(s) applied, 0 skipped (incomplete: 1 bucket(s) failed)
+  warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) in this dump have no payload bytes to restore — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+  restored app/Emails
+  restored app/Events
+  restored app/Jobs
+  restored app/Post
+  restored app/Tasks
+  restored app/Users
+  FAILED app/Files: restore start: server error (4): restore --drop would destroy blob payloads dump never captured: bucket app/Files is type blob, the dump is type blob — dump never captures blob payloads, so --drop would permanently destroy them recreating this bucket; run 'drop bucket Files' yourself first if this is really what you want, or restore into a different bucket
+Error: restore finished with 1 failed bucket(s), 0 skipped document(s) and 0 skipped store-field element(s); see above (exit code 3 outside the REPL)
+> restore --dir <OUT-DIR>/d1
+warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) in this dump have no payload bytes to restore — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+restoring app/Emails (1 document(s))...
+  app/Emails: 1 applied, 0 skipped
+restoring app/Events (1 document(s))...
+  app/Events: 1 applied, 0 skipped
+restoring app/Files (1 document(s))...
+  app/Files: 0 applied, 1 skipped
+restoring app/Jobs (1 document(s))...
+  app/Jobs: 1 applied, 0 skipped
+restoring app/Post (1 document(s))...
+  app/Post: 1 applied, 0 skipped
+  app/Post store fields: 2 element(s) applied, 0 skipped
+restoring app/Tasks (1 document(s))...
+  app/Tasks: 1 applied, 0 skipped
+restoring app/Users (2 document(s))...
+  app/Users: 2 applied, 0 skipped
+restore: 1 database(s), 7 bucket(s), 7 document(s) applied, 1 skipped
+  warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) in this dump have no payload bytes to restore — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+Error: restore finished with 0 failed bucket(s), 1 skipped document(s) and 0 skipped store-field element(s); see above (exit code 3 outside the REPL)
+> restore --dir <OUT-DIR>/none
+Error: "<OUT-DIR>/none" does not look like a hoardDB dump directory (reading manifest.json: open <OUT-DIR>/none/manifest.json: no such file or directory)
+> restore extra
+Error: usage: restore takes no positional arguments; name the source with --dir

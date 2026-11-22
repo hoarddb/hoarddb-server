@@ -1,0 +1,4 @@
+> drop bucket Scratch
+OK  bucket "Scratch" dropped from "app". Its space is reclaimed in the background; watch hoarddb_reclaim_pending_records to follow it.
+> drop bucket Scratch
+Error: drop bucket "Scratch": server error (1): bucket not found: bucket "Scratch" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Scratch in app { type: hash }' to create it

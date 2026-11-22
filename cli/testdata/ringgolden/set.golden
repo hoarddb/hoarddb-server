@@ -1,0 +1,23 @@
+[h]oardDB> set
+Error: PARSE_ERROR: cannot read the statement at character 4: found the end of the statement, expected "extjson", "pager" or "pretty". The form is 'set <setting> [on|off]'. For example 'set pretty on'. Run 'help set' for every form
+[h]oardDB> set pretty
+pretty is off; 'set pretty on' changes it.
+[h]oardDB> set pretty on
+pretty is now on for documents printed from now on.
+[h]oardDB> set pretty
+pretty is on; 'set pretty off' changes it.
+[h]oardDB> set extjson
+extjson is off; 'set extjson on' changes it.
+[h]oardDB> set extjson on
+extjson is now on for documents printed from now on.
+[h]oardDB> set pager
+pager is on; 'set pager off' changes it.
+[h]oardDB> set pager off
+pager is now off for reports longer than a screen.
+[h]oardDB> set pager on
+pager is now on for reports longer than a screen.
+Paging needs a terminal at both ends, and this session's input is not one: a piped run prints its reports in full.
+[h]oardDB> set pretty maybe
+Error: PARSE_ERROR: cannot read the statement at character 12: found "maybe", expected "off", "on" or the end of the statement. The form is 'set <setting> [on|off]'. For example 'set pretty on'. Run 'help set' for every form
+[h]oardDB> set colour on
+Error: PARSE_ERROR: cannot read the statement at character 5: found "colour", expected "extjson", "pager" or "pretty". The form is 'set <setting> [on|off]'. For example 'set pretty on'. Run 'help set' for every form

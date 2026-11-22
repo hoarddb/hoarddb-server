@@ -1,0 +1,7 @@
+hoardDB CLI <VERSION>
+Type 'help' for help, 'exit' to quit.
+
+Switched to database 'app'
+2
+
+returned error: <nil>

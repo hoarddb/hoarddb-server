@@ -1,0 +1,14 @@
+> db.Post.find()
+{"_id_": "p1", "title": "hello"}
+> db.Post.find("p1")
+{"_id_": "p1", "title": "hello"}
+> db.Post.get("p1")
+{"_id_": "p1", "title": "hello"}
+> db.Post.search({"title": "hello"})
+Found 1 results (full scan):
+{"_id_": "p1", "title": "hello"}
+> db.Post.update("p1", {$set: {"Name": "Ada"}})
+OK  updated "p1"
+{"Name": "Ada", "_id_": "p1", "title": "hello"}
+> db.Post.find({"Name": "Ada"})
+{"Name": "Ada", "_id_": "p1", "title": "hello"}

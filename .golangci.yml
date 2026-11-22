@@ -1,0 +1,8 @@
+version: "2"
+
+# Report every finding, not the first 50 per linter. The defaults silently
+# truncate output (50 issues/linter, 3 of the same message), which hides real
+# problems behind recurring ones — see the errcheck sweep of 2026-09.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

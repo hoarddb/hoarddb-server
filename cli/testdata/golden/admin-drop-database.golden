@@ -1,0 +1,4 @@
+> drop database app2
+OK  database "app2" dropped (0 bucket(s)). Its space is reclaimed in the background; watch hoarddb_reclaim_pending_records to follow it.
+> drop database app2
+Error: drop database "app2": server error (1): database "app2" not found on this node. Run 'show databases' to list what exists, or 'create database app2' to create it

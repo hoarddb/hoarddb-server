@@ -1,0 +1,188 @@
+> help
+
+hoardDB Query Language (HQL) — Quick Reference
+=============================================
+
+Global Commands:
+  use <database>                  Switch to a database (checks it exists)
+  show databases                  List all databases
+  show buckets                    List buckets in current database
+  show buckets in <database>      List buckets in a specific database
+  show banner                     Print the session banner again
+  set <setting> [on|off]          Change how output is printed: pretty, extjson, pager
+  describe bucket <name>          Bucket type, entries, logical size, indexes
+  describe bucket <name> in <database>  Same, naming the database (drop and alter bucket take 'in <database>' too)
+  describe database <name>        Database buckets
+  status                          Server status
+  encryption                      Is this node's store encrypted at rest (mode, keystore, key ids)
+  nodes                           List cluster nodes, and whether schema changes are paused by a join
+  nodes history                   Print this member's membership history, one line per epoch, to compare across members
+  join <id@host:port>             Add a node to the cluster and start rebalancing
+  remove-node <node-id>           Remove a cluster member (run it from another node)
+  connect <host:port>             Move this session to another server
+  help                            Show this help message
+  batch { <stmt>; <stmt>; ... }   Many store-field writes and reads in one request; not a transaction (help batch)
+  help <topic>                    Help on: hash, btree, fifo, lifo, heap, blob, claim, placement, fields, batch, user, theme, set, operators, config
+  exit / quit                     Exit the CLI
+
+Not available yet (the CLI says so instead of pretending to work):
+  db.<bucket>.stream(...)         (use get(), optionally {out: "file"})
+
+User Management (mutations are served by the cluster master; passwords are
+prompted twice with no echo, or read from a 0600 file / stdin — never a flag):
+  create user <name> roles [role@db, ...]     Create a user
+  alter user <name> password                  Change the password (prompted twice)
+  alter user <name> disable|enable            Disable or enable a user
+  alter user <name> roles [role@db, ...]      Replace a user's role set
+  drop user <name>                            Drop a user
+  grant role <role@db> to <user>              Add one grant
+  revoke role <role@db> from <user>           Remove one grant
+  user list                                   List users (never hashes)
+  user describe <name>                        One user's roles and status
+  master                                      Show the node serving user changes
+  --password-file <path> / --password-stdin   Non-interactive password source
+  Worked examples: help user
+
+Schema Management:
+  create database <name>          Create a new database
+  drop database <name>            Drop a database and its buckets (deletes data)
+  create bucket <name> { type: hash }               Create a bucket (hash is default)
+  create bucket <name> { type: hash, indices: ["Email", {field: "Login", unique: true}] }
+  alter bucket <name> { Tags hashStore }            Add a store field (indexes: declare them at create)
+  alter bucket Sessions { replication_factor: 5 }   Raise how many copies a bucket keeps (db-manager)
+  alter bucket Sessions { replication_factor: 2 }   Lower how many copies a bucket keeps; the removed copies are deleted once the rest hold everything (db-manager)
+  drop bucket <name>              Drop a bucket (deletes its data)
+
+Document syntax (all of these are accepted):
+  {"field": "value"}              strict JSON
+  {field: "value", n: 1}          unquoted keys
+  {field: 'value',}               single quotes, trailing comma
+
+Hash Store Operations (key-value — the default bucket type):
+  db.<bucket>.insert({field: value, ...})        Insert (returns the new _id_)
+  db.<bucket>.upsert({_id_: "key", field: value})  Replace the document's fields, or store it (stores kept)
+  db.<bucket>.find({_id_: "<uuid>"})             Fetch one document by key
+  db.<bucket>.find("<key>")                      Same, bare key
+  db.<bucket>.find()                             First 100 documents
+  db.<bucket>.find({field: value})               First 100 matching (scans)
+  db.<bucket>.find({field: {$regex: "^f"}})      Filter operators: help operators
+  db.<bucket>.find({}, {limit: 10})              Take 10; works on every type but blob
+  db.<bucket>.find({}, {skip: 100})              Next page
+  db.<bucket>.find({}, {limit: 10, skip: 100})   Both together
+  db.<bucket>.find({}, {sort: {Age: -1}, limit: 10})   Order first, then take 10
+  db.<bucket>.find({}, {projection: {Email: 0}, limit: 10})  Fewer fields back
+  db.<bucket>.delete("<key>")                    Delete by key
+  db.<bucket>.update("<key>", {$set: {field: value}})
+  db.<bucket>.update("<key>", {$set: {f: v}, $unset: ["old"], $inc: {n: 1}})
+  db.<bucket>.count()                            Number of entries
+  db.<bucket>.search({field: value})             Search, served by an index when one fits
+  db.<bucket>.stats()                            Type, entries, logical size, indexes
+  help hash                                      This topic, on its own
+
+Queue Operations (FIFO/LIFO):
+  db.<bucket>.push({field: value, ...})
+  db.<bucket>.pop()
+  db.<bucket>.pop({limit: 3})
+  db.<bucket>.peek()
+  db.<bucket>.peek({limit: 3})
+  db.<bucket>.length()
+  db.<bucket>.claim({limit: 10, lease: "30s"})
+  db.<bucket>.ack({lease_id: "<lease_id>", item_ids: ["<item_id>"]})
+  db.<bucket>.release({lease_id: "<lease_id>"})
+  db.<bucket>.extend({lease_id: "<lease_id>", lease: "60s"})
+  db.<bucket>.dead()
+  db.<bucket>.requeue({all: true})
+  db.<bucket>.discard({all: true})
+  pop() removes and returns the next entry; pop({limit: N}) removes and returns the next N, in pop order.
+  pop removes at most once; to process without losing work, use claim and ack (help claim).
+  To look without removing, use peek.
+  peek() returns the one entry pop() would take next.
+  peek({limit: N}) returns the next N, in pop order, and removes none of them.
+
+B+Tree Operations:
+  db.<bucket>.insert({_id_: "key", field: value})
+  db.<bucket>.upsert({_id_: "key", field: value})  Replace the document under that key, or store it
+  db.<bucket>.get("key")
+  db.<bucket>.range({$gte: low, $lte: high})
+  db.<bucket>.first()
+  db.<bucket>.last()
+
+Blob Operations:
+  db.<bucket>.put({_id_: "key", data: "hello", name: "hello.txt"})
+  db.<bucket>.get("key")                         Metadata + content
+  db.<bucket>.get({_id_: "key", out: "f.bin"})   Write content to a local file
+  db.<bucket>.info("key")                        Metadata and size only
+  db.<bucket>.delete("key")
+
+Heap Operations:
+  db.<bucket>.push({priority: N, field: value})
+  db.<bucket>.pop()
+  db.<bucket>.pop({limit: 3})
+  db.<bucket>.peek()
+  db.<bucket>.peek({limit: 3})
+  db.<bucket>.claim({limit: 10, lease: "30s"})
+  db.<bucket>.ack({lease_id: "<lease_id>", item_ids: ["<item_id>"]})
+  db.<bucket>.release({lease_id: "<lease_id>"})
+  db.<bucket>.extend({lease_id: "<lease_id>", lease: "60s"})
+  db.<bucket>.dead()
+  db.<bucket>.requeue({all: true})
+  db.<bucket>.discard({all: true})
+  pop removes at most once; to process without losing work, use claim and ack (help claim).
+
+Store Fields — a store on each document (help fields):
+  A bucket can declare fields, and a field can itself be a store of any of the
+  six types. The store belongs to each document, not to the bucket, so every
+  post has its own Comments.
+
+  create bucket Post { Comments fifoStore, Photos blobStore, Tags hashStore }
+  db.Post.insert({_id_: "p1", Title: "Sunset"})   the document the stores hang off
+  db.<bucket>["<key>"].<field>.<verb>(...)
+
+  [h]oardDB [app]> db.Post["p1"].Comments.push({by: "ada", text: "Lovely light"})
+  OK
+
+  That push added one comment to the fifoStore Comments of the Post document
+  "p1". The key is quoted, and the document must already exist.
+
+  fifo, lifo and heap fields:   push, pop, peek, len, list
+  hash and btree fields:       put, get, delete, len, list
+  blob fields:                 put, get, delete, len, list
+  len(), length() and count() all answer the count
+
+  db.Post["p1"].Comments.pop()                Remove the oldest
+  db.Post["p1"].Comments.pop({limit: 3})      Remove the oldest 3; peek looks without removing
+  db.Post["p1"].Comments.len()                How many it holds
+  db.Post["p1"].Tags.put("go", {n: 12})       Add an element (hash/btree)
+  db.Post["p1"].Tags.get("go")                Read it back (hash/btree/blob)
+  db.Post["p1"].Comments.list({limit: 10})    Elements, in storage order
+
+  A store on a store's elements, reached through the element:
+  create bucket Post { Comments fifoStore { Flags fifoStore } }
+  db.Post["p1"].Comments[0].Flags.push({reason: "spam"})
+
+  peek() returns the one element pop() would take next; peek({limit: N}) the
+  next N, in pop order. list reads in storage order, which on a lifo is the
+  reverse of pop order. "help fields" has the details, including what a blob
+  field's put carries.
+
+Statistics:
+  db.<bucket>.stats()
+
+Counting: len(), length() and count() are the same verb at either level — on a
+bucket and on a store field — and return the same number whichever you write.
+
+Taking N elements is also one verb per level, and the names differ: on a bucket
+it is find({}, {limit: N}), on a store field it is list({limit: N}). There is no
+list() on a bucket.
+
+Update Operators (server-applied):
+  $set {field: value}   $unset ["field"]   $inc {field: N}
+
+Long output arrives a screen at a time, the way more(1) shows it: space for the
+next page, enter for one line, b for the page before, g and G for the first and
+last, q to stop. A report that fits is printed in place, and a piped run is
+never paged. Start the CLI with -no-pager to print everything in full.
+
+Statements end with ; (optional in interactive mode).
+> help find
+Error: unknown help topic "find". Available topics: hash, btree, fifo, lifo, heap, blob, claim, placement, fields, batch, user, theme, set, operators, config. Run 'help' for the quick reference

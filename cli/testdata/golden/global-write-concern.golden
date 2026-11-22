@@ -1,0 +1,6 @@
+> write-concern majority
+Write concern set to majority for subsequent writes.
+> write-concern
+Error: parse: usage: write-concern <one|majority|all>
+> write-concern bogus
+Error: unknown write concern "bogus" — use one, majority, or all

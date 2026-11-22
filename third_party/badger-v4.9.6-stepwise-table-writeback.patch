@@ -1,0 +1,953 @@
+diff --git a/db.go b/db.go
+index 45764837..cb78d905 100644
+--- a/db.go
++++ b/db.go
+@@ -19,6 +19,9 @@
+  * Modified by the hoardDB project, 2026-10-19: a write that would wait for room
+  * behind a level 0 held at its stall limit by a damaged table is refused,
+  * naming the table. See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-10-26: Open refuses an unknown
++ * TableSyncMode. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -182,6 +185,11 @@ func checkAndSetOptions(opt *Options) error {
+ 	if opt.InMemory && (opt.Dir != "" || opt.ValueDir != "") {
+ 		return errors.New("Cannot use badger in Disk-less mode with Dir or ValueDir set")
+ 	}
++	// Refused here, not at the first flush, where it would fail every flush
++	// and end in refused writes.
++	if opt.TableSyncMode != options.TableSyncStepwise && opt.TableSyncMode != options.TableSyncMsync {
++		return fmt.Errorf("unknown TableSyncMode %d: use options.TableSyncStepwise or options.TableSyncMsync", opt.TableSyncMode)
++	}
+ 	opt.maxBatchSize = (15 * opt.MemTableSize) / 100
+ 	opt.maxBatchCount = opt.maxBatchSize / int64(skl.MaxNodeSize)
+ 
+diff --git a/options.go b/options.go
+index 2ead08c3..12515274 100644
+--- a/options.go
++++ b/options.go
+@@ -1,6 +1,10 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-26: TableSyncMode and
++ * TableSyncStepSize choose how a new table file is made durable.
++ * See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -93,6 +97,13 @@ type Options struct {
+ 	// ChecksumVerificationMode decides when db should verify checksums for SSTable blocks.
+ 	ChecksumVerificationMode options.ChecksumVerificationMode
+ 
++	// TableSyncMode decides how a new SSTable (a memtable flush or a
++	// compaction output) is made durable before the MANIFEST names it
++	// (hoardDB; see options.TableSyncMode). TableSyncStepSize is the largest
++	// writeback request of options.TableSyncStepwise, in bytes.
++	TableSyncMode     options.TableSyncMode
++	TableSyncStepSize int
++
+ 	// DetectConflicts determines whether the transactions would be checked for
+ 	// conflicts. The transactions can be processed at a higher rate when
+ 	// conflict detection is disabled.
+@@ -160,6 +171,9 @@ func DefaultOptions(path string) Options {
+ 		// Benchmark code can be found in table/builder_test.go file
+ 		ZSTDCompressionLevel: 1,
+ 
++		TableSyncMode:     options.TableSyncMsync,
++		TableSyncStepSize: table.DefaultTableSyncStepSize,
++
+ 		// (2^30 - 1)*2 when mmapping < 2^31 - 1, max int32.
+ 		// -1 so 2*ValueLogFileSize won't overflow on 32-bit systems.
+ 		ValueLogFileSize: 1<<30 - 1,
+@@ -194,6 +208,8 @@ func buildTableOptions(db *DB) table.Options {
+ 		IndexCache:           db.indexCache,
+ 		AllocPool:            db.allocPool,
+ 		DataKey:              dk,
++		SyncMode:             opt.TableSyncMode,
++		SyncStepSize:         opt.TableSyncStepSize,
+ 	}
+ }
+ 
+@@ -669,6 +685,28 @@ func (opt Options) WithChecksumVerificationMode(cvMode options.ChecksumVerificat
+ 	return opt
+ }
+ 
++// WithTableSyncMode returns a new Options value with TableSyncMode set to the
++// given value.
++//
++// TableSyncMode decides how a new SSTable is made durable. The default,
++// options.TableSyncMsync, is upstream's one blocking msync per table.
++// options.TableSyncStepwise writes the file back in steps of
++// TableSyncStepSize and waits once, leaving its metadata to the MANIFEST
++// fsync that follows; it relies on a filesystem that commits its journal in
++// order (ext4 or XFS with a journal), so it is opt-in.
++func (opt Options) WithTableSyncMode(mode options.TableSyncMode) Options {
++	opt.TableSyncMode = mode
++	return opt
++}
++
++// WithTableSyncStepSize returns a new Options value with TableSyncStepSize
++// set to the given number of bytes: the largest writeback request of
++// options.TableSyncStepwise. Zero or less means 4 MiB, the default.
++func (opt Options) WithTableSyncStepSize(stepBytes int) Options {
++	opt.TableSyncStepSize = stepBytes
++	return opt
++}
++
+ // WithBlockCacheSize returns a new Options value with BlockCacheSize set to the given value.
+ //
+ // This value specifies how much data cache should hold in memory. A small size
+diff --git a/options/options.go b/options/options.go
+index 3dcf9012..09a8d500 100644
+--- a/options/options.go
++++ b/options/options.go
+@@ -1,6 +1,9 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-26: TableSyncMode selects how a new
++ * table file is made durable. See hoardDB/third_party/README.md.
+  */
+ 
+ package options
+@@ -31,3 +34,25 @@ const (
+ 	// ZSTD mode indicates that a block is compressed using ZSTD algorithm.
+ 	ZSTD CompressionType = 2
+ )
++
++// TableSyncMode selects how a new table file (a memtable flush or a compaction
++// output) is made durable before the MANIFEST names it. hoardDB.
++type TableSyncMode int
++
++const (
++	// TableSyncMsync is upstream Badger's one blocking msync(MS_SYNC) of the
++	// whole file, which also commits the file's metadata. On ext4 each one
++	// waits for a journal commit, and the writes behind it stall. The zero
++	// value, so it is the default: an Options built by hand, or by a tool
++	// that never heard of this setting, keeps upstream's behaviour.
++	TableSyncMsync TableSyncMode = iota
++	// TableSyncStepwise writes the table back in ranges of at most the table
++	// sync step, without waiting on each, then waits once for the whole file.
++	// It does not commit the file's metadata (its size and block allocation):
++	// the MANIFEST fsync that follows does, but only on a filesystem that
++	// commits its journal in order (ext4 or XFS with a journal; not btrfs,
++	// ZFS or ext4 without a journal). Opt-in, because the filesystem cannot be
++	// checked from here. On a platform without ranged writeback (anything but
++	// Linux) it is TableSyncMsync.
++	TableSyncStepwise
++)
+diff --git a/options_test.go b/options_test.go
+index 9800d90d..007ca1d8 100644
+--- a/options_test.go
++++ b/options_test.go
+@@ -7,6 +7,7 @@ package badger
+ 
+ import (
+ 	"reflect"
++	"strings"
+ 	"testing"
+ 
+ 	"github.com/dgraph-io/badger/v4/options"
+@@ -81,3 +82,52 @@ func optionsEqual(o1, o2 Options) bool {
+ 	}
+ 	return true
+ }
++
++// TestTableWritebackOptionsReachTheTables checks that the hoardDB table sync
++// options are passed to every table the DB builds, default to upstream's
++// single msync (the stepwise writeback is opt-in: it is safe only on a
++// filesystem that commits its journal in order), that the stepwise mode is
++// passed through when asked for, and that an unknown mode is refused at Open
++// rather than at the first flush.
++func TestTableWritebackOptionsReachTheTables(t *testing.T) {
++	defaults := DefaultOptions("")
++	if defaults.TableSyncMode != options.TableSyncMsync || defaults.TableSyncStepSize != 4<<20 {
++		t.Fatalf("defaults: mode %d step %d, want msync and 4 MiB", defaults.TableSyncMode, defaults.TableSyncStepSize)
++	}
++	if (Options{}).TableSyncMode != options.TableSyncMsync {
++		t.Fatalf("the zero Options has mode %d, want msync: an Options built by hand must not opt in to stepwise", Options{}.TableSyncMode)
++	}
++
++	cases := []struct {
++		name     string
++		opts     func(Options) Options
++		wantMode options.TableSyncMode
++		wantStep int
++	}{
++		{"default", func(o Options) Options { return o }, options.TableSyncMsync, 4 << 20},
++		{"stepwise, 1 MiB", func(o Options) Options {
++			return o.WithTableSyncMode(options.TableSyncStepwise).WithTableSyncStepSize(1 << 20)
++		}, options.TableSyncStepwise, 1 << 20},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			db, err := Open(tc.opts(getTestOptions(t.TempDir())))
++			if err != nil {
++				t.Fatalf("Open: %v", err)
++			}
++			tableOpts := buildTableOptions(db)
++			if tableOpts.SyncMode != tc.wantMode || tableOpts.SyncStepSize != tc.wantStep {
++				t.Errorf("table options: mode %d step %d, want mode %d step %d",
++					tableOpts.SyncMode, tableOpts.SyncStepSize, tc.wantMode, tc.wantStep)
++			}
++			if err := db.Close(); err != nil {
++				t.Fatalf("Close: %v", err)
++			}
++		})
++	}
++
++	_, err := Open(getTestOptions(t.TempDir()).WithTableSyncMode(options.TableSyncMode(7)))
++	if err == nil || !strings.Contains(err.Error(), "unknown TableSyncMode 7") {
++		t.Fatalf("Open with an unknown mode: %v, want it refused naming the mode", err)
++	}
++}
+diff --git a/table/table.go b/table/table.go
+index 67094eb7..981acd20 100644
+--- a/table/table.go
++++ b/table/table.go
+@@ -8,6 +8,12 @@
+  * of a slice out of range; Block.verifyCheckSum refuses a checksum naming an
+  * unknown algorithm instead of panicking in y.CalculateChecksum.
+  * See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-10-26: CreateTable makes the new file
++ * durable through syncNewTable, which on request (options.TableSyncStepwise;
++ * the default stays upstream's one blocking msync) writes it back in steps and
++ * waits once (Options.SyncMode, SyncStepSize).
++ * See hoardDB/third_party/README.md.
+  */
+ 
+ package table
+@@ -80,6 +86,14 @@ type Options struct {
+ 
+ 	// ZSTDCompressionLevel is the ZSTD compression level used for compressing blocks.
+ 	ZSTDCompressionLevel int
++
++	// SyncMode selects how CreateTable makes a new table file durable
++	// (hoardDB; see options.TableSyncMode).
++	SyncMode options.TableSyncMode
++	// SyncStepSize is the largest range one writeback request covers under
++	// options.TableSyncStepwise, in bytes. Zero or less means
++	// DefaultTableSyncStepSize.
++	SyncStepSize int
+ }
+ 
+ // TableInterface is useful for testing.
+@@ -267,8 +281,12 @@ func CreateTable(fname string, builder *Builder) (*Table, error) {
+ 
+ 	written := bd.Copy(mf.Data)
+ 	y.AssertTrue(written == len(mf.Data))
+-	if err := z.Msync(mf.Data); err != nil {
+-		return nil, y.Wrapf(err, "while calling msync on %s", fname)
++	if err := syncNewTable(mf, builder.opts, tableSync); err != nil {
++		// %w, not y.Wrapf, which flattens the cause: a caller can tell EIO
++		// from ENOSPC. A failed cleanup is reported with the sync error, never
++		// instead of it.
++		syncErr := fmt.Errorf("while syncing new table %s: %w", fname, err)
++		return nil, errors.Join(syncErr, discardUnsyncedTable(mf))
+ 	}
+ 	return OpenTable(mf, *builder.opts)
+ }
+diff --git a/table/table_sync.go b/table/table_sync.go
+new file mode 100644
+index 00000000..b554bce6
+--- /dev/null
++++ b/table/table_sync.go
+@@ -0,0 +1,155 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-10-26: how CreateTable makes a new table
++ * file durable. See hoardDB/third_party/README.md.
++ */
++
++package table
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"sync/atomic"
++	"syscall"
++
++	"github.com/dgraph-io/badger/v4/options"
++	"github.com/dgraph-io/ristretto/v2/z"
++)
++
++// DefaultTableSyncStepSize is the writeback step of options.TableSyncStepwise
++// when Options.SyncStepSize is not set: 4 MiB measured the lowest write p99 of
++// the step sizes tried (see the table-writeback patch decision record in the
++// hoardDB repository).
++const DefaultTableSyncStepSize = 4 << 20
++
++// tableSyncCalls are the system calls CreateTable uses to make a new table
++// file durable. They are a variable so a test can watch them.
++type tableSyncCalls struct {
++	// msync is the one blocking whole-file sync (upstream's z.Msync).
++	msync func(mapped []byte) error
++	// startWriteback queues the dirty pages of [offset, offset+length) for
++	// writeback and does not wait for them. Nil where the platform has no
++	// ranged writeback.
++	startWriteback func(fd uintptr, offset, length int64) error
++	// waitWriteback writes back [offset, offset+length) and waits until every
++	// page of it has reached the device. Nil with startWriteback.
++	waitWriteback func(fd uintptr, offset, length int64) error
++}
++
++// tableSync is platformTableSync except in tests.
++var tableSync = platformTableSync
++
++// rangedWritebackRefused is set once the kernel refused sync_file_range
++// (isRangedWritebackRefusal): the refusal comes from the kernel or the
++// sandbox, not from one table, so later tables in this process go straight to
++// the msync instead of making a call that will be refused again.
++var rangedWritebackRefused atomic.Bool
++
++// isRangedWritebackRefusal reports whether err is the kernel refusing ranged
++// writeback outright rather than failing it: ENOSYS (no such call), EPERM (a
++// seccomp profile that filters it with an errno), EINVAL or EOPNOTSUPP (a
++// kernel or filesystem that does not take it). The kernel returns each of
++// these before it writes anything back or reads the file's writeback error,
++// so the msync that follows sees any writeback error still unreported.
++func isRangedWritebackRefusal(err error) bool {
++	return errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EPERM) ||
++		errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EOPNOTSUPP)
++}
++
++// tableSyncFixHint is appended to a stepwise writeback error. The setting is
++// hoardDB's (storage/badger.go maps it onto Options.TableSyncMode).
++const tableSyncFixHint = "if sync_file_range(2) is what fails on this system, set storage.badger_table_sync to msync " +
++	"(or HOARDDB_BADGER_TABLE_SYNC=msync) and restart to sync tables with one msync each; " +
++	"an I/O error (EIO) more likely means the disk is failing, which msync will not fix"
++
++// syncNewTable makes the table file mf durable as opts.SyncMode asks, before
++// CreateTable returns and so before the MANIFEST can name the table.
++//
++// TableSyncStepwise queues the file for writeback a step at a time, so the
++// device is fed in pieces instead of all at once, then waits once for the
++// whole range. It leaves the file's metadata (size, block allocation, the
++// directory entry) to the journal: every caller fsyncs the MANIFEST before a
++// table is used or its inputs deleted, and on ext4 or XFS that fsync commits
++// the journal up to and including this file's metadata, with a cache flush
++// ahead of it that covers the data written back here. The one msync it
++// replaces committed the journal itself, once per table, and on ext4 each
++// commit stalled every write behind it.
++func syncNewTable(mf *z.MmapFile, opts *Options, calls tableSyncCalls) error {
++	switch opts.SyncMode {
++	case options.TableSyncMsync:
++		return calls.msync(mf.Data)
++	case options.TableSyncStepwise:
++		if calls.startWriteback == nil || rangedWritebackRefused.Load() {
++			return calls.msync(mf.Data)
++		}
++		err := writeBackInSteps(mf.Fd.Fd(), int64(len(mf.Data)), int64(opts.SyncStepSize), calls)
++		// A refusal after some steps succeeded still falls back: the msync
++		// covers the whole mapping and waits for pages already under
++		// writeback, so the steps before it change nothing it guarantees.
++		if isRangedWritebackRefusal(err) {
++			rangedWritebackRefused.Store(true)
++			return calls.msync(mf.Data)
++		}
++		// Anything else, EIO above all, is not retried with the msync: a
++		// failed wait has handed the file's writeback error to this call, and
++		// an msync after it could report success over pages that never reached
++		// the device. A failed step is treated the same way, to be safe.
++		if err != nil {
++			return fmt.Errorf("%w (%s)", err, tableSyncFixHint)
++		}
++		return nil
++	default:
++		return fmt.Errorf("unknown table sync mode %d (want options.TableSyncStepwise or options.TableSyncMsync)", opts.SyncMode)
++	}
++}
++
++// writeBackInSteps starts writeback of [0, tableBytes) in ranges of at most
++// stepBytes, then waits for the whole range. The waits are not per step:
++// waiting on each 256 KiB step measured a p99 of 81 ms against 46 ms for 4 MiB
++// steps and one wait.
++func writeBackInSteps(fd uintptr, tableBytes, stepBytes int64, calls tableSyncCalls) error {
++	if stepBytes <= 0 {
++		stepBytes = DefaultTableSyncStepSize
++	}
++	for offset := int64(0); offset < tableBytes; offset += stepBytes {
++		length := min(stepBytes, tableBytes-offset)
++		if err := calls.startWriteback(fd, offset, length); err != nil {
++			return fmt.Errorf("starting writeback of bytes %d-%d of %d: %w", offset, offset+length, tableBytes, err)
++		}
++	}
++	// A length of zero would mean "to the end of the file"; an empty table
++	// has nothing to wait for.
++	if tableBytes == 0 {
++		return nil
++	}
++	if err := calls.waitWriteback(fd, 0, tableBytes); err != nil {
++		return fmt.Errorf("waiting for writeback of %d bytes: %w", tableBytes, err)
++	}
++	return nil
++}
++
++// discardUnsyncedTable unmaps, closes and removes a table file whose sync
++// failed, so a flush that retries the table does not keep a descriptor and a
++// mapping per attempt. It does not use mf.Close, which msyncs first and, when
++// that fails (as it can after a failed writeback), returns with the mapping
++// and the descriptor still open. No MANIFEST names the file yet, so removing
++// it loses nothing; if the removal fails, the next open removes the file as
++// one the MANIFEST does not name (revertToManifest).
++func discardUnsyncedTable(mf *z.MmapFile) error {
++	path := mf.Fd.Name()
++	var unmapErr, closeErr, removeErr error
++	if err := z.Munmap(mf.Data); err != nil {
++		unmapErr = fmt.Errorf("unmapping unsynced table %s: %w", path, err)
++	}
++	mf.Data = nil
++	if err := mf.Fd.Close(); err != nil {
++		closeErr = fmt.Errorf("closing unsynced table %s: %w", path, err)
++	}
++	if err := os.Remove(path); err != nil {
++		removeErr = fmt.Errorf("removing unsynced table %s (the next open removes it): %w", path, err)
++	}
++	return errors.Join(unmapErr, closeErr, removeErr)
++}
+diff --git a/table/table_sync_linux.go b/table/table_sync_linux.go
+new file mode 100644
+index 00000000..3dff00f3
+--- /dev/null
++++ b/table/table_sync_linux.go
+@@ -0,0 +1,47 @@
++//go:build linux
++
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-10-26. See hoardDB/third_party/README.md.
++ */
++
++package table
++
++import (
++	"fmt"
++
++	"github.com/dgraph-io/ristretto/v2/z"
++	"golang.org/x/sys/unix"
++)
++
++// platformTableSync writes a table back with sync_file_range(2). The pages
++// were dirtied through the file's shared mapping; the kernel tracks those as
++// dirty page-cache pages (write-notify on a filesystem with writeback), so a
++// ranged writeback covers them as it covers write(2).
++var platformTableSync = tableSyncCalls{
++	msync:          z.Msync,
++	startWriteback: startRangeWriteback,
++	waitWriteback:  waitRangeWriteback,
++}
++
++func startRangeWriteback(fd uintptr, offset, length int64) error {
++	return syncFileRange(fd, offset, length, unix.SYNC_FILE_RANGE_WRITE)
++}
++
++// waitRangeWriteback waits for pages already under writeback (started by
++// startRangeWriteback), writes the ones still dirty, and waits for those too.
++func waitRangeWriteback(fd uintptr, offset, length int64) error {
++	return syncFileRange(fd, offset, length,
++		unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER)
++}
++
++// syncFileRange keeps the errno matchable: syncNewTable falls back to the
++// msync on the ones that mean the call is refused (isRangedWritebackRefusal).
++func syncFileRange(fd uintptr, offset, length int64, flags int) error {
++	if err := unix.SyncFileRange(int(fd), offset, length, flags); err != nil {
++		return fmt.Errorf("sync_file_range: %w", err)
++	}
++	return nil
++}
+diff --git a/table/table_sync_other.go b/table/table_sync_other.go
+new file mode 100644
+index 00000000..52e0ebf5
+--- /dev/null
++++ b/table/table_sync_other.go
+@@ -0,0 +1,16 @@
++//go:build !linux
++
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-10-26. See hoardDB/third_party/README.md.
++ */
++
++package table
++
++import "github.com/dgraph-io/ristretto/v2/z"
++
++// platformTableSync has no ranged writeback off Linux, so syncNewTable uses
++// the one msync whatever the mode.
++var platformTableSync = tableSyncCalls{msync: z.Msync}
+diff --git a/table/table_writeback_linux_test.go b/table/table_writeback_linux_test.go
+new file mode 100644
+index 00000000..25469193
+--- /dev/null
++++ b/table/table_writeback_linux_test.go
+@@ -0,0 +1,136 @@
++//go:build linux
++
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-10-26. See hoardDB/third_party/README.md.
++ */
++
++package table
++
++import (
++	"errors"
++	"fmt"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++
++	"github.com/dgraph-io/badger/v4/options"
++)
++
++// TestTableWritebackLeavesNoDirtyPagesOnARealDisk runs the real
++// sync_file_range calls, which the other tests replace: once CreateTable
++// returns, no page of the new table may be dirty or under writeback, for a
++// table that does not end on a step boundary. It cannot cut power, so it asks
++// the kernel (cachestat(2)), as the DB.Sync patch tests do. It does not show
++// that the file's metadata is durable: that is the MANIFEST fsync's job.
++func TestTableWritebackLeavesNoDirtyPagesOnARealDisk(t *testing.T) {
++	dir := t.TempDir()
++	var fsStat unix.Statfs_t
++	require.NoError(t, unix.Statfs(dir, &fsStat))
++	if fsStat.Type == unix.TMPFS_MAGIC || fsStat.Type == unix.RAMFS_MAGIC {
++		t.Skip("tmpfs never writes back, so its pages stay dirty; set TMPDIR to a disk")
++	}
++
++	for _, stepSize := range []int{0, 1 << 20, 256 << 10} {
++		tbl, err := createTableOfMiB(t, dir, 9, Options{SyncMode: options.TableSyncStepwise, SyncStepSize: stepSize})
++		require.NoError(t, err, "step %d", stepSize)
++		require.NotZero(t, len(tbl.Data)%(256<<10), "the table ends on a step boundary")
++
++		var pageCache unix.Cachestat_t
++		err = unix.Cachestat(uint(tbl.Fd.Fd()), &unix.CachestatRange{}, &pageCache, 0)
++		if errors.Is(err, unix.ENOSYS) {
++			t.Skip("cachestat(2) needs Linux 6.5 or later")
++		}
++		require.NoError(t, err)
++		require.Zero(t, pageCache.Dirty, "step %d: dirty pages left in %s after CreateTable", stepSize, tbl.Fd.Name())
++		require.Zero(t, pageCache.Writeback, "step %d: pages under writeback in %s after CreateTable", stepSize, tbl.Fd.Name())
++
++		require.NoError(t, tbl.DecrRef())
++		_, err = os.Stat(tbl.Filename())
++		require.True(t, os.IsNotExist(err), "the table file was not removed")
++	}
++}
++
++// TestTableWritebackFailureLeavesNoFileOrMapping checks that a CreateTable
++// whose sync failed releases what it opened: the flush retries the table, and
++// each attempt that keeps a descriptor and a mapping of the half-written file
++// leaks both until the process ends. The file is removed too, so the next
++// open does not depend on revertToManifest to clear it. When the removal
++// itself fails, the sync error is still the one returned, with the removal's
++// error alongside.
++func TestTableWritebackFailureLeavesNoFileOrMapping(t *testing.T) {
++	tests := []struct {
++		name         string
++		removalFails bool
++		wantFileGone bool
++	}{
++		{"removed", false, true},
++		{"removal refused", true, false},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if tt.removalFails && os.Geteuid() == 0 {
++				t.Skip("root removes a file from a read-only directory")
++			}
++			dir := t.TempDir()
++			recorder := &syncRecorder{startErr: fmt.Errorf("sync_file_range: %w", syscall.EIO), failFromStart: 2}
++			if tt.removalFails {
++				// After the file was created and before the sync fails.
++				recorder.beforeStartErr = func() { require.NoError(t, os.Chmod(dir, 0o555)) }
++				t.Cleanup(func() { require.NoError(t, os.Chmod(dir, 0o755)) })
++			}
++			recordTableSync(t, recorder, true)
++
++			_, err := createTableOfMiB(t, dir, 9, Options{SyncMode: options.TableSyncStepwise, SyncStepSize: 1 << 20})
++			require.Error(t, err)
++			require.True(t, errors.Is(err, syscall.EIO), "the sync error is masked: %v", err)
++			if tt.removalFails {
++				require.True(t, errors.Is(err, fs.ErrPermission), "the failed removal is not reported: %v", err)
++			}
++
++			tablePath := NewFilename(1, dir)
++			require.Empty(t, openDescriptorsOf(t, tablePath), "a descriptor of %s is still open", tablePath)
++			require.Empty(t, mappingsOf(t, tablePath), "%s is still mapped", tablePath)
++			_, statErr := os.Stat(tablePath)
++			require.Equal(t, tt.wantFileGone, os.IsNotExist(statErr), "file present: %v", statErr)
++		})
++	}
++}
++
++// openDescriptorsOf lists this process's descriptors open on path.
++func openDescriptorsOf(t *testing.T, path string) []string {
++	entries, err := os.ReadDir("/proc/self/fd")
++	require.NoError(t, err)
++	var open []string
++	for _, entry := range entries {
++		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
++		if err != nil {
++			continue // closed between ReadDir and Readlink (the ReadDir's own descriptor)
++		}
++		if strings.TrimSuffix(target, " (deleted)") == path {
++			open = append(open, entry.Name())
++		}
++	}
++	return open
++}
++
++// mappingsOf lists this process's memory mappings of path.
++func mappingsOf(t *testing.T, path string) []string {
++	maps, err := os.ReadFile("/proc/self/maps")
++	require.NoError(t, err)
++	var mapped []string
++	for _, line := range strings.Split(string(maps), "\n") {
++		if strings.HasSuffix(strings.TrimSuffix(line, " (deleted)"), " "+path) {
++			mapped = append(mapped, line)
++		}
++	}
++	return mapped
++}
+diff --git a/table/table_writeback_test.go b/table/table_writeback_test.go
+new file mode 100644
+index 00000000..e5bf30df
+--- /dev/null
++++ b/table/table_writeback_test.go
+@@ -0,0 +1,314 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-10-26. See hoardDB/third_party/README.md.
++ */
++
++package table
++
++import (
++	"crypto/rand"
++	"errors"
++	"fmt"
++	"syscall"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++
++	"github.com/dgraph-io/badger/v4/options"
++	"github.com/dgraph-io/badger/v4/y"
++)
++
++// syncCall is one call CreateTable made through tableSyncCalls.
++type syncCall struct {
++	kind   string // "msync", "start" or "wait"
++	fd     uintptr
++	offset int64
++	length int64
++}
++
++// syncRecorder stands in for the platform's sync calls and records them in
++// order. startErr, when set, is what startWriteback returns: on every call,
++// or from call number failFromStart (1-based) on when that is set. waitErr is
++// what waitWriteback returns. beforeStartErr, when set, runs just before a
++// startWriteback returns startErr.
++type syncRecorder struct {
++	calls          []syncCall
++	startErr       error
++	failFromStart  int
++	waitErr        error
++	beforeStartErr func()
++	startCount     int
++}
++
++func (r *syncRecorder) tableSyncCalls(rangedWriteback bool) tableSyncCalls {
++	calls := tableSyncCalls{
++		msync: func(mapped []byte) error {
++			r.calls = append(r.calls, syncCall{kind: "msync", length: int64(len(mapped))})
++			return nil
++		},
++	}
++	if !rangedWriteback {
++		return calls
++	}
++	calls.startWriteback = func(fd uintptr, offset, length int64) error {
++		r.calls = append(r.calls, syncCall{kind: "start", fd: fd, offset: offset, length: length})
++		r.startCount++
++		if r.startErr == nil || r.startCount < r.failFromStart {
++			return nil
++		}
++		if r.beforeStartErr != nil {
++			r.beforeStartErr()
++		}
++		return r.startErr
++	}
++	calls.waitWriteback = func(fd uintptr, offset, length int64) error {
++		r.calls = append(r.calls, syncCall{kind: "wait", fd: fd, offset: offset, length: length})
++		return r.waitErr
++	}
++	return calls
++}
++
++// recordTableSync replaces the package's sync calls with recorder's for the
++// rest of the test.
++func recordTableSync(t *testing.T, recorder *syncRecorder, rangedWriteback bool) {
++	saved := tableSync
++	savedRefused := rangedWritebackRefused.Load()
++	tableSync = recorder.tableSyncCalls(rangedWriteback)
++	rangedWritebackRefused.Store(false)
++	t.Cleanup(func() {
++		tableSync = saved
++		rangedWritebackRefused.Store(savedRefused)
++	})
++}
++
++// createTableOfMiB builds and creates a table of about sizeMiB MiB of
++// incompressible values in dir, under opts.
++func createTableOfMiB(t *testing.T, dir string, sizeMiB int, opts Options) (*Table, error) {
++	opts.BlockSize = 4 << 10
++	opts.Compression = options.None
++	opts.BloomFalsePositive = 0.01
++	builder := NewTableBuilder(opts)
++	defer builder.Close()
++	const valueBytes = 1000
++	for i := 0; i < sizeMiB<<20/valueBytes; i++ {
++		randomValue := make([]byte, valueBytes)
++		_, err := rand.Read(randomValue)
++		require.NoError(t, err)
++		builder.Add(y.KeyWithTs([]byte(fmt.Sprintf("key-%09d", i)), 0),
++			y.ValueStruct{Value: randomValue}, 0)
++	}
++	return CreateTable(NewFilename(1, dir), builder)
++}
++
++// TestTableWritebackIsStepwiseAndWaitedBeforeCreateTableReturns checks
++// options.TableSyncStepwise: a new table is never synced with one whole-file msync
++// (on ext4 each waits for a journal commit and stalls the writes behind it);
++// it is written back in ranges no larger than the step, the ranges cover the
++// file once in order, and one wait over the whole file is the last call, made
++// before CreateTable returns, so the table is on the device before the
++// MANIFEST can name it.
++func TestTableWritebackIsStepwiseAndWaitedBeforeCreateTableReturns(t *testing.T) {
++	tests := []struct {
++		name         string
++		stepSize     int
++		wantStepSize int64
++	}{
++		{"default step of 4 MiB", 0, DefaultTableSyncStepSize},
++		{"configured 1 MiB step", 1 << 20, 1 << 20},
++		{"configured 256 KiB step", 256 << 10, 256 << 10},
++		{"step larger than the table", 64 << 20, 64 << 20},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			recorder := &syncRecorder{}
++			recordTableSync(t, recorder, true)
++
++			tbl, err := createTableOfMiB(t, t.TempDir(), 9, Options{SyncMode: options.TableSyncStepwise, SyncStepSize: tt.stepSize})
++			require.NoError(t, err)
++			defer func() { require.NoError(t, tbl.DecrRef()) }()
++
++			tableBytes := int64(len(tbl.Data))
++			require.NotZero(t, tableBytes%(256<<10), "the table must not end on a step boundary, or the last short step goes untested")
++			require.NotEmpty(t, recorder.calls)
++			for i, call := range recorder.calls {
++				require.NotEqual(t, "msync", call.kind, "call %d is a whole-file blocking msync: %+v", i, recorder.calls)
++			}
++
++			var nextOffset int64
++			for i, call := range recorder.calls[:len(recorder.calls)-1] {
++				require.Equal(t, "start", call.kind, "call %d: only the last call may wait: %+v", i, recorder.calls)
++				require.Equal(t, tbl.Fd.Fd(), call.fd, "call %d is not on the table's file", i)
++				require.Equal(t, nextOffset, call.offset, "call %d leaves a gap or overlaps", i)
++				require.LessOrEqual(t, call.length, tt.wantStepSize, "call %d writes back more than one step", i)
++				require.Positive(t, call.length, "call %d is empty (a zero length means to the end of the file)", i)
++				nextOffset += call.length
++			}
++			require.Equal(t, tableBytes, nextOffset, "the steps do not cover the whole table")
++
++			finalWait := recorder.calls[len(recorder.calls)-1]
++			require.Equal(t, syncCall{kind: "wait", fd: tbl.Fd.Fd(), offset: 0, length: tableBytes}, finalWait,
++				"the last call must wait for the whole table")
++		})
++	}
++}
++
++// TestTableWritebackFallsBackToMsyncWithoutRangedWriteback checks the
++// platforms without ranged writeback (every build but Linux, whose
++// platformTableSync has no startWriteback): the stepwise mode syncs the table
++// with upstream's one msync, so it is durable there too.
++func TestTableWritebackFallsBackToMsyncWithoutRangedWriteback(t *testing.T) {
++	recorder := &syncRecorder{}
++	recordTableSync(t, recorder, false)
++
++	tbl, err := createTableOfMiB(t, t.TempDir(), 2, Options{SyncMode: options.TableSyncStepwise})
++	require.NoError(t, err)
++	defer func() { require.NoError(t, tbl.DecrRef()) }()
++
++	require.Equal(t, []syncCall{{kind: "msync", length: int64(len(tbl.Data))}}, recorder.calls)
++}
++
++// TestTableWritebackModeMsyncIsUpstreamsOneSync checks that the old behaviour
++// stays selectable: options.TableSyncMsync is one whole-file msync and no
++// ranged writeback, even where ranged writeback exists.
++func TestTableWritebackModeMsyncIsUpstreamsOneSync(t *testing.T) {
++	recorder := &syncRecorder{}
++	recordTableSync(t, recorder, true)
++
++	tbl, err := createTableOfMiB(t, t.TempDir(), 2, Options{SyncMode: options.TableSyncMsync})
++	require.NoError(t, err)
++	defer func() { require.NoError(t, tbl.DecrRef()) }()
++
++	require.Equal(t, []syncCall{{kind: "msync", length: int64(len(tbl.Data))}}, recorder.calls)
++}
++
++// TestTableWritebackZeroOptionsIsUpstreamsOneSync checks that the stepwise
++// writeback is opt-in at the table level too: Options with no SyncMode set (a
++// caller that builds its own, as Badger's own tests and tools do) syncs a new
++// table with upstream's one whole-file msync even where ranged writeback
++// exists. Stepwise is safe only on a filesystem that commits its journal in
++// order, which nothing here can check.
++func TestTableWritebackZeroOptionsIsUpstreamsOneSync(t *testing.T) {
++	recorder := &syncRecorder{}
++	recordTableSync(t, recorder, true)
++
++	tbl, err := createTableOfMiB(t, t.TempDir(), 2, Options{})
++	require.NoError(t, err)
++	defer func() { require.NoError(t, tbl.DecrRef()) }()
++
++	require.Equal(t, []syncCall{{kind: "msync", length: int64(len(tbl.Data))}}, recorder.calls)
++}
++
++// TestTableWritebackFailureIsAnError checks that a writeback the kernel
++// refuses fails CreateTable with the cause, so the flush or compaction fails
++// and the MANIFEST never names the table; and that a kernel without the call
++// (ENOSYS) falls back to the msync instead.
++func TestTableWritebackFailureIsAnError(t *testing.T) {
++	t.Run("EIO fails the table", func(t *testing.T) {
++		recorder := &syncRecorder{startErr: syscall.EIO}
++		recordTableSync(t, recorder, true)
++
++		_, err := createTableOfMiB(t, t.TempDir(), 2, Options{SyncMode: options.TableSyncStepwise})
++		require.Error(t, err)
++		require.True(t, errors.Is(err, syscall.EIO), "the cause is lost: %v", err)
++		for _, call := range recorder.calls {
++			require.NotEqual(t, "msync", call.kind, "a failed writeback must not be papered over: %+v", recorder.calls)
++		}
++	})
++	t.Run("EIO on a later step fails the table and names the setting", func(t *testing.T) {
++		// EIO means the pages may not be on the device, and the kernel has
++		// handed that error to this call: an msync after it could report
++		// success. Never fall back on it.
++		recorder := &syncRecorder{startErr: fmt.Errorf("sync_file_range: %w", syscall.EIO), failFromStart: 2}
++		recordTableSync(t, recorder, true)
++
++		_, err := createTableOfMiB(t, t.TempDir(), 9, Options{SyncMode: options.TableSyncStepwise, SyncStepSize: 1 << 20})
++		require.Error(t, err)
++		require.True(t, errors.Is(err, syscall.EIO), "the cause is lost: %v", err)
++		require.Contains(t, err.Error(), "storage.badger_table_sync", "the error does not name the setting")
++		require.Contains(t, err.Error(), "msync", "the error does not name the value that avoids sync_file_range")
++		for _, call := range recorder.calls {
++			require.NotEqual(t, "msync", call.kind, "a failed writeback must not be papered over: %+v", recorder.calls)
++		}
++	})
++	t.Run("ENOSYS falls back to msync", func(t *testing.T) {
++		// As the Linux startWriteback reports a kernel without the call.
++		recorder := &syncRecorder{startErr: fmt.Errorf("sync_file_range: %w", syscall.ENOSYS)}
++		recordTableSync(t, recorder, true)
++
++		tbl, err := createTableOfMiB(t, t.TempDir(), 2, Options{SyncMode: options.TableSyncStepwise})
++		require.NoError(t, err)
++		defer func() { require.NoError(t, tbl.DecrRef()) }()
++		finalCall := recorder.calls[len(recorder.calls)-1]
++		require.Equal(t, syncCall{kind: "msync", length: int64(len(tbl.Data))}, finalCall)
++	})
++}
++
++// TestTableWritebackRefusedFallsBackToMsync checks the kernels and sandboxes
++// that refuse sync_file_range outright: a seccomp profile that filters it
++// answers EPERM, a kernel or filesystem without it EINVAL or EOPNOTSUPP. The
++// old msync worked there, so the table must be synced with it and CreateTable
++// succeed, wherever in the table the refusal comes. Each is returned before
++// the kernel looks at the file's writeback error, so the msync cannot hide one.
++func TestTableWritebackRefusedFallsBackToMsync(t *testing.T) {
++	refusals := []syscall.Errno{syscall.EPERM, syscall.EINVAL, syscall.EOPNOTSUPP, syscall.ENOSYS}
++	places := []struct {
++		name     string
++		recorder func(refusal error) *syncRecorder
++	}{
++		{"first step", func(refusal error) *syncRecorder { return &syncRecorder{startErr: refusal} }},
++		{"later step", func(refusal error) *syncRecorder { return &syncRecorder{startErr: refusal, failFromStart: 3} }},
++		{"final wait", func(refusal error) *syncRecorder { return &syncRecorder{waitErr: refusal} }},
++	}
++	for _, refusal := range refusals {
++		for _, place := range places {
++			t.Run(fmt.Sprintf("%s on the %s", refusal, place.name), func(t *testing.T) {
++				// As table_sync_linux.go reports what the kernel answered.
++				recorder := place.recorder(fmt.Errorf("sync_file_range: %w", refusal))
++				recordTableSync(t, recorder, true)
++
++				tbl, err := createTableOfMiB(t, t.TempDir(), 9, Options{SyncMode: options.TableSyncStepwise, SyncStepSize: 1 << 20})
++				require.NoError(t, err, "a refused sync_file_range must fall back to the msync")
++				defer func() { require.NoError(t, tbl.DecrRef()) }()
++
++				finalCall := recorder.calls[len(recorder.calls)-1]
++				require.Equal(t, syncCall{kind: "msync", length: int64(len(tbl.Data))}, finalCall,
++					"the table is not synced with a whole-file msync after the refusal: %+v", recorder.calls)
++				msyncs := 0
++				for _, call := range recorder.calls {
++					if call.kind == "msync" {
++						msyncs++
++					}
++				}
++				require.Equal(t, 1, msyncs, "one msync, after the refusal: %+v", recorder.calls)
++			})
++		}
++	}
++}
++
++// TestTableWritebackRefusalIsRememberedForLaterTables checks that once the
++// kernel refused sync_file_range, later tables go straight to the msync: the
++// refusal is a property of the kernel or the sandbox, and asking again for
++// every table is a wasted system call per flush and per compaction output.
++func TestTableWritebackRefusalIsRememberedForLaterTables(t *testing.T) {
++	recorder := &syncRecorder{startErr: fmt.Errorf("sync_file_range: %w", syscall.EPERM)}
++	recordTableSync(t, recorder, true)
++	dir := t.TempDir()
++
++	opts := Options{SyncMode: options.TableSyncStepwise, SyncStepSize: 1 << 20, BlockSize: 4 << 10, Compression: options.None, BloomFalsePositive: 0.01}
++	for tableID := uint64(1); tableID <= 2; tableID++ {
++		recorder.calls = nil
++		builder := NewTableBuilder(opts)
++		builder.Add(y.KeyWithTs([]byte("key"), 0), y.ValueStruct{Value: []byte("value")}, 0)
++		tbl, err := CreateTable(NewFilename(tableID, dir), builder)
++		builder.Close()
++		require.NoError(t, err, "table %d", tableID)
++		require.Equal(t, "msync", recorder.calls[len(recorder.calls)-1].kind, "table %d: %+v", tableID, recorder.calls)
++		if tableID == 2 {
++			require.Equal(t, []syncCall{{kind: "msync", length: int64(len(tbl.Data))}}, recorder.calls,
++				"the second table asked for sync_file_range again after the kernel refused it")
++		}
++		require.NoError(t, tbl.DecrRef())
++	}
++}

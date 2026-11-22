@@ -1,0 +1,32 @@
+[h]oardDB [app]> db.User["ada"].get()
+{"Age": 36, "Joined": "2024-08-24T04:57:21.295Z", "Name": "Ada", "_id_": "ada"}
+[h]oardDB [app]> db.User["nobody"].get()
+Error: NOT_FOUND: document "nobody" is not in app.User. Run 'db.User.list({limit: 10})' to see what exists, or 'db.User.insert({_id_: "nobody", <field>: <value>})' to create it
+[h]oardDB [app]> db.User.list()
+{"Age": 36, "Joined": "2024-08-24T04:57:21.295Z", "Name": "Ada", "_id_": "ada"}
+[h]oardDB [app]> db.User.count()
+1
+[h]oardDB [app]> db.User["ada"].Purchases.push({Item: "coffee", Qty: 2})
+OK  pushed: Purchases now holds 1 element
+[h]oardDB [app]> db.User["ada"].Purchases.push({Item: "tea", Qty: 1})
+OK  pushed: Purchases now holds 2 elements
+[h]oardDB [app]> db.User["ada"].Friends.put("grace", {since: 2024})
+OK  put "grace": Friends now holds 1 element
+[h]oardDB [app]> db.User["ada"].get()
+{"Age": 36, "Friends": "hashStore (1 element)", "Joined": "2024-08-24T04:57:21.295Z", "Name": "Ada", "Purchases": "fifoStore (2 elements)", "_id_": "ada"}
+[h]oardDB [app]> db.User["ada"].Purchases.peek()
+{"Item": "coffee", "Qty": 2}
+[h]oardDB [app]> db.User["ada"].Purchases.peek({limit: 2})
+{"Item": "coffee", "Qty": 2}
+{"Item": "tea", "Qty": 1}
+[h]oardDB [app]> db.User["ada"].Purchases.list({limit: 10})
+{"Item": "coffee", "Qty": 2}
+{"Item": "tea", "Qty": 1}
+[h]oardDB [app]> db.User["ada"].Purchases.pop()
+{"Item": "coffee", "Qty": 2}
+[h]oardDB [app]> db.User["ada"].Purchases.count()
+1
+[h]oardDB [app]> db.User["ada"].Purchases.pop()
+{"Item": "tea", "Qty": 1}
+[h]oardDB [app]> db.User["ada"].Purchases.pop()
+Error: NOT_FOUND: Purchases of "ada" in app.User is empty, so there is nothing to pop. Run 'db.User["ada"].Purchases.count()' to look without removing, or 'db.User["ada"].Purchases.push({…})' to add

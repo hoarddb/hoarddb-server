@@ -1,0 +1,8 @@
+> db.Users.count()
+2
+> db.Users.length()
+2
+> db.Jobs.count()
+1
+> db.Nope.count()
+Error: count failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

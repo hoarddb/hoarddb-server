@@ -1,0 +1,10 @@
+> db.Jobs.push({"task": "y"})
+OK  id=<ID>
+> db.Tasks.push({"priority": 1, "task": "u"})
+OK  id=<ID>
+> db.Files.push({"a": 1})
+Error: push failed: server error (4): push is not supported for bucket type blob. A blob bucket takes: get, exists, delete, put blob, get blob, count, stats.
+> db.Users.push({"a": 1})
+OK  id=<ID>
+> db.Events.push({"a": 1})
+OK  id=<ID>

@@ -1,0 +1,14 @@
+> grant role writer@app to bob
+granted writer@app to "bob" (config version 3)
+> user describe bob
+user:  bob
+status: enabled
+roles:  [reader@app, writer@app]
+epoch:  1
+created: <TIMESTAMP>
+password changed: <TIMESTAMP>
+> revoke role writer@app from bob
+revoked writer@app from "bob" (config version 4)
+> grant access to app for bob
+Error: the 'access' form is not supported; grant a role instead:
+  grant role writer@app to bob

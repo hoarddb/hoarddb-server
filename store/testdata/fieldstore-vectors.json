@@ -1,0 +1,38 @@
+{
+  "comment": "Frozen field-store key vectors (nested buckets, GAP-22; S-1 ruled document-first 2026-09-29). Every hex string was written by hand from the grammar in store/fieldkey.go's header, not produced by the code under test: owner = [slot:2][database id:8][bucket id:8][0x07] || 0x50 || the key with each 0x00 written 0x00 0xFF || 0x00 0x00; store prefix = owner || field id (2 bytes BE); element = store prefix || inner byte || remainder; fifo remainder = position (8 bytes BE); heap remainder = ^(uint64(priority) ^ 1<<63) (8 bytes BE) || 0x50 || entry id || 0x00 0x00; keyed remainder = 0x50 || key || 0x00 0x00; state key = store prefix || 0x05; state value = head, tail, next, count, 8 bytes BE each. slot 0x0abc, database id 1, bucket id 0x0102 throughout (the database id was inserted by U2 of the entry-ring build, which moved every key to the 19-byte prefix).",
+  "generator": "none, deliberately: TestFieldStoreKeyEncodingFrozen has no regenerate mode, as storage/keys_test.go:TestSlotFunctionIsFrozen has none. A frozen file the test can regenerate is not frozen; a changed row re-points every field-store element ever written.",
+  "slot": 2748,
+  "bucket_id": 258,
+  "owners": [
+    {"document_key": "p1", "hex": "0abc00000000000000010000000000000102075070310000"},
+    {"document_key": "a\u0000b", "hex": "0abc0000000000000001000000000000010207506100ff620000"},
+    {"document_key": "", "hex": "0abc0000000000000001000000000000010207500000"}
+  ],
+  "store_prefixes": [
+    {"document_key": "p1", "field_id": 1, "hex": "0abc000000000000000100000000000001020750703100000001"},
+    {"document_key": "p1", "field_id": 258, "hex": "0abc000000000000000100000000000001020750703100000102"}
+  ],
+  "fifo_elements": [
+    {"document_key": "p1", "field_id": 1, "position": 0, "hex": "0abc000000000000000100000000000001020750703100000001040000000000000000"},
+    {"document_key": "p1", "field_id": 1, "position": 1099511627783, "hex": "0abc000000000000000100000000000001020750703100000001040000010000000007"}
+  ],
+  "heap_elements": [
+    {"document_key": "p1", "field_id": 2, "priority": "-9223372036854775808", "entry_id": "e", "hex": "0abc00000000000000010000000000000102075070310000000204ffffffffffffffff50650000"},
+    {"document_key": "p1", "field_id": 2, "priority": "-1", "entry_id": "e", "hex": "0abc00000000000000010000000000000102075070310000000204800000000000000050650000"},
+    {"document_key": "p1", "field_id": 2, "priority": "0", "entry_id": "e", "hex": "0abc000000000000000100000000000001020750703100000002047fffffffffffffff50650000"},
+    {"document_key": "p1", "field_id": 2, "priority": "1", "entry_id": "e", "hex": "0abc000000000000000100000000000001020750703100000002047ffffffffffffffe50650000"},
+    {"document_key": "p1", "field_id": 2, "priority": "9223372036854775807", "entry_id": "e", "hex": "0abc00000000000000010000000000000102075070310000000204000000000000000050650000"}
+  ],
+  "keyed_elements": [
+    {"document_key": "p1", "field_id": 1, "element_key": "k", "hex": "0abc00000000000000010000000000000102075070310000000101506b0000"}
+  ],
+  "state_keys": [
+    {"document_key": "p1", "field_id": 1, "hex": "0abc00000000000000010000000000000102075070310000000105"}
+  ],
+  "state_values": [
+    {"head": 1, "tail": 2, "next": 3, "count": 4, "hex": "0000000000000001000000000000000200000000000000030000000000000004"}
+  ],
+  "l3_elements": [
+    {"comment": "post p1, fifo field 1, element at position 5, heap field 2, priority 10, entry f", "document_key": "p1", "l2_field_id": 1, "l2_position": 5, "l3_field_id": 2, "priority": "10", "entry_id": "f", "hex": "0abc0000000000000001000000000000010207507031000000010700000000000000050002047ffffffffffffff550660000"}
+  ]
+}

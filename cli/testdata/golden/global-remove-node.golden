@@ -1,0 +1,4 @@
+> remove-node n2
+Error: remove-node n2: server error (5): replication is not enabled on this node
+> remove-node
+Error: parse: usage: remove-node <node-id>

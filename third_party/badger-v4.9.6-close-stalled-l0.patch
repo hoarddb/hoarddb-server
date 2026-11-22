@@ -1,0 +1,206 @@
+diff --git a/db.go b/db.go
+index 0be123b8..f44e41af 100644
+--- a/db.go
++++ b/db.go
+@@ -11,6 +11,10 @@
+  * reports the memtables it left unflushed; a full memtable that cannot be
+  * replaced stays current and refuses the write instead of leaving no
+  * memtable. See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-10-18: Close does not wait for a level-0
++ * compaction that cannot succeed (ErrL0StalledByDamagedTable). See
++ * hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -579,6 +583,9 @@ func (db *DB) close() (err error) {
+ 	var leftCurrent int
+ 	var leftCause error
+ 	defer func() {
++		if stalledErr := db.lc.stalledByUnreadableTable(); stalledErr != nil {
++			err = errors.Join(stalledErr, err)
++		}
+ 		if unflushed := db.unflushed + leftCurrent; unflushed > 0 {
+ 			if db.unflushedCause != nil {
+ 				leftCause = db.unflushedCause
+@@ -664,6 +671,12 @@ func (db *DB) close() (err error) {
+ 				if pushedMemTable {
+ 					break
+ 				}
++				// The flush goroutine may be parked in addLevel0Table waiting for
++				// a level-0 compaction that cannot succeed (BUG-0381). isClosed
++				// is set, so waking it makes it add its table and take the next
++				// memtable, which makes room here. Without this the push waits
++				// for a compaction that never comes.
++				db.lc.levels[0].signalL0Drained()
+ 				time.Sleep(10 * time.Millisecond)
+ 			}
+ 		}
+@@ -1123,6 +1136,12 @@ var errNoRoom = errors.New("No room for write")
+ // not be created. The error names the cause. Reads are still served.
+ var ErrWritesRefused = errors.New("writes are refused: the memtables cannot be persisted")
+ 
++// ErrL0StalledByDamagedTable is wrapped by the error Close returns when level 0
++// was at its stall limit because every compaction that includes a table with an
++// unreadable block fails and keeps its inputs (BUG-0381). The error names the
++// table; Close still completes.
++var ErrL0StalledByDamagedTable = errors.New("level 0 is stalled behind a table that cannot be read")
++
+ // flushFailuresBeforeRefusal is how many flush attempts in a row must fail
+ // before writes are refused. One failure may be transient; the flush is
+ // retried every flushRetryInterval regardless, and a success lifts the
+diff --git a/levels.go b/levels.go
+index 8ab32bc4..6cc99720 100644
+--- a/levels.go
++++ b/levels.go
+@@ -5,6 +5,10 @@
+  * Modified by the hoardDB project, 2026-10-05: a compaction whose iterator
+  * stops on a table block it cannot read fails, instead of writing what it read
+  * and deleting the damaged table. See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-10-18: Close reports a level 0 held at
++ * its stall limit by a compaction that cannot read a table. See
++ * hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -37,6 +41,17 @@ type levelsController struct {
+ 	nextFileID atomic.Uint64
+ 	l0stallsMs atomic.Int64
+ 
++	// unreadableTableFailure is the latest compaction error that met a table
++	// block it could not read. Close reports it when level 0 had to be pushed
++	// past its stall limit because such a compaction keeps its inputs
++	// (BUG-0381). It is never cleared: the damage is on disk until the node is
++	// restored, and it is read only at Close.
++	unreadableTableFailure atomic.Pointer[string]
++	// l0TablesForcedAtClose is the table count of a level 0 that addLevel0Table,
++	// during Close, added to although it was at its stall limit; 0 if it did
++	// not. It is kept because the levels are emptied before Close returns.
++	l0TablesForcedAtClose atomic.Int64
++
+ 	// The following are initialized once and const.
+ 	levels []*levelHandler
+ 	kv     *DB
+@@ -1636,6 +1651,12 @@ func (s *levelsController) doCompact(id int, p compactionPriority) error {
+ 	if err := s.runCompactDef(id, l, cd); err != nil {
+ 		// This compaction couldn't be done successfully.
+ 		s.kv.opt.Warningf("[Compactor: %d] LOG Compact FAILED with error: %+v: %+v", id, err, cd)
++		// y.Wrap flattens errors with %+v, so errors.Is cannot see ErrBlockRead.
++		// The text starts at it to drop the compaction dump before it.
++		if _, blockFailure, found := strings.Cut(err.Error(), table.ErrBlockRead.Error()); found {
++			blockFailure = table.ErrBlockRead.Error() + blockFailure
++			s.unreadableTableFailure.Store(&blockFailure)
++		}
+ 		return err
+ 	}
+ 
+@@ -1682,6 +1703,7 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
+ 		// both IsClosed() (normal Close) and the flush goroutine's own closer
+ 		// (also covers the Open-error cleanup path, where IsClosed may be unset).
+ 		if s.kv.IsClosed() || s.kv.flushStopped() {
++			s.l0TablesForcedAtClose.Store(int64(l0.numTablesLocked()))
+ 			break
+ 		}
+ 		stalled = true
+@@ -1704,6 +1726,20 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
+ 	return nil
+ }
+ 
++// stalledByUnreadableTable returns the error Close reports when it had to add a
++// table to a level 0 at its stall limit and a compaction had failed on a table
++// block it could not read, or nil. The data is all on disk; the error is the
++// operator's only notice that the node cannot compact level 0 any more.
++func (s *levelsController) stalledByUnreadableTable() error {
++	failure := s.unreadableTableFailure.Load()
++	if failure == nil || s.l0TablesForcedAtClose.Load() == 0 {
++		return nil
++	}
++	return fmt.Errorf("DB.Close: %w: level 0 held %d tables, its stall limit is %d, because every compaction "+
++		"that includes the damaged table fails and keeps it, so writes were blocked (%s)",
++		ErrL0StalledByDamagedTable, s.l0TablesForcedAtClose.Load(), s.kv.opt.NumLevelZeroTablesStall, *failure)
++}
++
+ func (s *levelsController) close() error {
+ 	err := s.cleanupLevels()
+ 	return y.Wrap(err, "levelsController.Close")
+diff --git a/stalled_close_test.go b/stalled_close_test.go
+new file mode 100644
+index 00000000..06a33d7f
+--- /dev/null
++++ b/stalled_close_test.go
+@@ -0,0 +1,74 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package badger
++
++import (
++	"os"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++// TestCloseOfAStoreStalledByACorruptBlockReturnsAndNamesTheTable is BUG-0381:
++// with a table that has a corrupt block in level 0, the compaction that would
++// drain level 0 fails and keeps its inputs, level 0 sits at the stall limit,
++// the flush goroutine parks in addLevel0Table, the channel behind it fills, and
++// Close waited for room in that channel forever.
++func TestCloseOfAStoreStalledByACorruptBlockReturnsAndNamesTheTable(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	writeTable(t, dir, 0, corruptBlockEntries)
++	writeTable(t, dir, corruptBlockEntries, 2*corruptBlockEntries)
++	tablePaths := tablesIn(t, dir)
++	require.Len(t, tablePaths, 2)
++	flipByte(t, tablePaths[0])
++
++	db, err := Open(corruptBlockOptions(dir).
++		WithNumLevelZeroTables(1).WithNumLevelZeroTablesStall(2).WithNumMemtables(2).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10))
++	require.NoError(t, err)
++	// The compactors are off so the failure is recorded once, deterministically.
++	require.Error(t, db.lc.doCompact(0, compactionPriority{level: 0, score: 1.71, adjusted: 1.71}))
++
++	var committed atomic.Int64
++	writerDone := make(chan struct{})
++	go func() {
++		defer close(writerDone)
++		for index := 2 * corruptBlockEntries; ; index++ {
++			err := db.Update(func(txn *Txn) error {
++				return txn.Set(corruptBlockKey(index), corruptBlockValue(index))
++			})
++			if err != nil {
++				return
++			}
++			committed.Add(1)
++		}
++	}()
++	// Stalled: no write has committed for a second, long after the memtable filled.
++	lastCount, lastChange := int64(-1), time.Now()
++	for deadline := time.Now().Add(time.Minute); ; {
++		require.True(t, time.Now().Before(deadline), "the store never stalled")
++		if count := committed.Load(); count != lastCount {
++			lastCount, lastChange = count, time.Now()
++		} else if count > 1000 && time.Since(lastChange) > time.Second {
++			break
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++
++	closed := make(chan error, 1)
++	go func() { closed <- db.Close() }()
++	select {
++	case closeErr := <-closed:
++		require.ErrorIs(t, closeErr, ErrL0StalledByDamagedTable)
++		require.Contains(t, closeErr.Error(), tablePaths[0])
++	case <-time.After(30 * time.Second):
++		t.Fatal("Close of a store stalled behind a corrupt level-0 table did not return within 30s")
++	}
++	<-writerDone
++}

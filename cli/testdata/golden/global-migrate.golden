@@ -1,0 +1,4 @@
+> migrate app Users
+Error: migrate app Users: server error (5): replication is not enabled on this node; a standalone node has no bucket to migrate
+> migrate app
+Error: parse: usage: migrate <database> <bucket>

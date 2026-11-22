@@ -1,0 +1,99 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-16",
+ "kinds": [
+  {
+   "name": "activity",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "company",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "permission",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "activity",
+   "filters": [
+    {
+     "field": "f0",
+     "optional": true
+    },
+    {
+     "field": "f1",
+     "optional": true
+    },
+    {
+     "field": "f2",
+     "optional": true
+    },
+    {
+     "field": "f3",
+     "optional": true
+    },
+    {
+     "field": "f4",
+     "optional": true
+    },
+    {
+     "field": "f5",
+     "optional": true
+    }
+   ],
+   "substring": true
+  },
+  {
+   "op": "join",
+   "coll": "activity",
+   "join": {
+    "to": "permission",
+    "on": "activity",
+    "kind": "visibility"
+   }
+  },
+  {
+   "op": "join",
+   "coll": "activity",
+   "join": {
+    "to": "company",
+    "on": "report",
+    "kind": "aggregate"
+   },
+   "dynamic": true,
+   "surface": "admin"
+  }
+ ]
+}

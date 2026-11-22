@@ -1,0 +1,536 @@
+//go:build linux
+
+/*
+ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Added by the hoardDB project, 2026-10-27: tests that DB.Sync does not hold
+ * db.lock while it syncs the active memtable's WAL, and that it stays durable
+ * and safe when that memtable rotates, flushes or the DB closes meanwhile.
+ * See hoardDB/third_party/README.md.
+ */
+
+package badger
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
+)
+
+// How long a step that must not wait for the parked Sync is given. On the
+// fixed code each takes milliseconds; the bound only has to separate "ran"
+// from "waited for the msync", and the msync never ends while it is parked.
+const syncLockStepTimeout = 20 * time.Second
+
+// openSyncLockTestDB opens a DB in a fresh directory on a real disk: the
+// page-cache checks below mean nothing on tmpfs, which never writes back.
+func openSyncLockTestDB(t *testing.T, tune func(Options) Options) (*DB, Options) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "badger-test")
+	require.NoError(t, err)
+	t.Cleanup(func() { removeDir(dir) })
+
+	var fsStat unix.Statfs_t
+	require.NoError(t, unix.Statfs(dir, &fsStat))
+	if fsStat.Type == unix.TMPFS_MAGIC || fsStat.Type == unix.RAMFS_MAGIC {
+		t.Skip("tmpfs never writes back, so msync leaves its pages dirty; set TMPDIR to a disk")
+	}
+	opt := tune(getTestOptions(dir).
+		WithMemTableSize(1 << 20).
+		WithValueThreshold(1 << 10).
+		WithValueLogFileSize(1 << 20))
+	db, err := Open(opt)
+	require.NoError(t, err)
+	return db, opt
+}
+
+// closeAtCleanup closes db in a cleanup registered before the test parks a
+// Sync, so it runs after that Sync's cleanup has released it: a deferred Close
+// would wait for db.lock behind a Sync that a failed test left parked.
+func closeAtCleanup(t *testing.T, db *DB) {
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+}
+
+// parkedSync is a DB.Sync held by syncActiveWALHook just before it syncs the
+// active memtable's WAL.
+type parkedSync struct {
+	mt          *memTable
+	walPath     string
+	release     chan struct{}
+	releaseOnce sync.Once
+	done        chan error
+}
+
+// parkSyncInActiveWAL starts db.Sync on its own goroutine and returns once it
+// is parked in front of the active memtable's msync. The cleanup releases it
+// and waits for it, so a failed test leaves no goroutine behind.
+func parkSyncInActiveWAL(t *testing.T, db *DB) *parkedSync {
+	t.Helper()
+	p := &parkedSync{release: make(chan struct{}), done: make(chan error, 1)}
+	parked := make(chan *memTable, 1)
+	var once sync.Once
+	syncActiveWALHook = func(mt *memTable) {
+		once.Do(func() {
+			parked <- mt
+			<-p.release
+		})
+	}
+	go func() { p.done <- db.Sync() }()
+	t.Cleanup(func() {
+		p.releaseOnce.Do(func() { close(p.release) })
+		<-p.done
+		syncActiveWALHook = nil
+	})
+	select {
+	case p.mt = <-parked:
+		p.walPath = p.mt.wal.Fd.Name()
+	case <-time.After(syncLockStepTimeout):
+		t.Fatal("DB.Sync never reached the active memtable's WAL sync")
+	}
+	return p
+}
+
+// resume lets the parked Sync run its msync and returns what Sync returned.
+func (p *parkedSync) resume(t *testing.T) error {
+	t.Helper()
+	p.releaseOnce.Do(func() { close(p.release) })
+	select {
+	case err := <-p.done:
+		p.done <- err // for the cleanup
+		return err
+	case <-time.After(2 * syncLockStepTimeout):
+		t.Fatal("DB.Sync did not return once released")
+		return nil
+	}
+}
+
+// async runs step on its own goroutine; the returned channel yields its error.
+func async(step func() error) chan error {
+	done := make(chan error, 1)
+	go func() { done <- step() }()
+	return done
+}
+
+// finishedWithin reports whether done yielded within syncLockStepTimeout, and
+// the error it yielded.
+func finishedWithin(done chan error) (bool, error) {
+	select {
+	case err := <-done:
+		return true, err
+	case <-time.After(syncLockStepTimeout):
+		return false, nil
+	}
+}
+
+// writeFill commits n batches of 64 inline 512-byte values under prefix.
+func writeFill(db *DB, prefix string, n int) error {
+	for b := range n {
+		err := db.Update(func(txn *Txn) error {
+			for i := range 64 {
+				if err := txn.Set([]byte(fmt.Sprintf("%s-%05d-%02d", prefix, b, i)), make([]byte, 512)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("batch %d of %s: %w", b, prefix, err)
+		}
+	}
+	return nil
+}
+
+// writeUntilRotated commits batches until the active memtable is no longer
+// the one Sync captured.
+func writeUntilRotated(db *DB, captured *memTable, prefix string) error {
+	for b := 0; ; b++ {
+		if err := writeFill(db, fmt.Sprintf("%s-%04d", prefix, b), 1); err != nil {
+			return err
+		}
+		db.lock.RLock()
+		rotated := db.mt != captured
+		db.lock.RUnlock()
+		if rotated {
+			return nil
+		}
+		if b > 1000 {
+			return errors.New("the memtable never rotated")
+		}
+	}
+}
+
+func numImmutables(db *DB) int {
+	db.lock.RLock()
+	defer db.lock.RUnlock()
+	return len(db.imm)
+}
+
+// pageCacheOf asks the kernel for the page-cache state of the file at path.
+func pageCacheOf(t *testing.T, path string) unix.Cachestat_t {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	var cs unix.Cachestat_t
+	err = unix.Cachestat(uint(f.Fd()), &unix.CachestatRange{}, &cs, 0)
+	if errors.Is(err, unix.ENOSYS) {
+		t.Skip("cachestat(2) needs Linux 6.5 or later")
+	}
+	require.NoError(t, err)
+	return cs
+}
+
+// TestSyncActiveWALDoesNotBlockReadsOrRotation checks that DB.Sync does not
+// hold db.lock across the active memtable's msync. Held, a write that has to
+// rotate the memtable (ensureRoomForWrite takes db.lock.Lock) waits for the
+// msync, and every read (getMemTables takes db.lock.RLock, which queues behind
+// a pending Lock) waits with it.
+func TestSyncActiveWALDoesNotBlockReadsOrRotation(t *testing.T) {
+	db, _ := openSyncLockTestDB(t, func(o Options) Options { return o })
+	closeAtCleanup(t, db)
+
+	require.NoError(t, db.Update(func(txn *Txn) error {
+		return txn.Set([]byte("committed-before-sync"), []byte("v"))
+	}))
+	p := parkSyncInActiveWAL(t, db)
+
+	// 48 batches of 32 KiB fill the 1 MiB memtable at least once.
+	rotation := async(func() error { return writeFill(db, "rotate", 48) })
+	rotated, err := finishedWithin(rotation)
+	require.NoError(t, err)
+	if !rotated {
+		t.Errorf("a write that rotates the memtable waited %s for the parked Sync: "+
+			"ensureRoomForWrite's db.lock.Lock is queued behind Sync's read lock", syncLockStepTimeout)
+	} else {
+		db.lock.RLock()
+		require.NotSame(t, p.mt, db.mt, "the writes did not rotate the memtable")
+		db.lock.RUnlock()
+	}
+
+	read := async(func() error {
+		return db.View(func(txn *Txn) error {
+			_, err := txn.Get([]byte("committed-before-sync"))
+			return err
+		})
+	})
+	readDone, err := finishedWithin(read)
+	require.NoError(t, err)
+	if !readDone {
+		t.Errorf("a read waited %s for the parked Sync: getMemTables' read lock is queued "+
+			"behind the rotation's pending db.lock.Lock", syncLockStepTimeout)
+	}
+
+	require.NoError(t, p.resume(t))
+	if !rotated {
+		_, err = finishedWithin(rotation)
+		require.NoError(t, err)
+	}
+	if !readDone {
+		_, err = finishedWithin(read)
+		require.NoError(t, err)
+	}
+}
+
+// fillLevelZeroToStall writes and flushes memtables until level 0 holds two
+// tables. With no compactors and a level-0 stall of 2, the next flush then
+// waits in addLevel0Table, so the memtable it carries stays in db.imm.
+func fillLevelZeroToStall(t *testing.T, db *DB) {
+	t.Helper()
+	for b := 0; db.lc.levels[0].numTables() < 2; b++ {
+		require.NoError(t, writeFill(db, fmt.Sprintf("stall-%04d", b), 1))
+		deadline := time.Now().Add(30 * time.Second)
+		for numImmutables(db) > 0 {
+			require.True(t, time.Now().Before(deadline), "memtable flush did not finish")
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+// copyDirImage copies every regular file of src into a new directory: what a
+// power cut would leave, provided nothing in src is dirty in the page cache.
+// The MANIFEST is copied first: a table file is created and synced before the
+// MANIFEST names it, so every table the copied MANIFEST names is already there
+// when the directory is listed. Copied after the listing, it could name a table
+// a flush created in between, an image no crash can leave. (No table is
+// deleted meanwhile: the callers run without compactors.)
+func copyDirImage(t *testing.T, src string) string {
+	t.Helper()
+	dst, err := os.MkdirTemp("", "badger-image")
+	require.NoError(t, err)
+	t.Cleanup(func() { removeDir(dst) })
+	copyFile := func(name string) {
+		in, err := os.Open(filepath.Join(src, name))
+		require.NoError(t, err)
+		out, err := os.Create(filepath.Join(dst, name))
+		require.NoError(t, err)
+		_, err = io.Copy(out, in)
+		require.NoError(t, err)
+		require.NoError(t, in.Close())
+		require.NoError(t, out.Close())
+	}
+	copyFile(ManifestFilename)
+	entries, err := os.ReadDir(src)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if !e.Type().IsRegular() || e.Name() == ManifestFilename {
+			continue
+		}
+		copyFile(e.Name())
+	}
+	return dst
+}
+
+// TestSyncActiveWALCoversARotationDuringTheSync parks Sync in the active
+// memtable's msync, rotates that memtable with another writer, and resumes
+// Sync. The captured memtable is now immutable; Sync must still have synced
+// its whole WAL (and the value log), so no page of either is dirty or under
+// writeback when Sync returns, and an image of the directory taken then opens
+// with every entry committed before Sync was called.
+func TestSyncActiveWALCoversARotationDuringTheSync(t *testing.T) {
+	db, opt := openSyncLockTestDB(t, func(o Options) Options {
+		return o.WithNumCompactors(0).WithNumLevelZeroTables(1).WithNumLevelZeroTablesStall(2)
+	})
+	closeAtCleanup(t, db)
+	fillLevelZeroToStall(t, db)
+	// hoardDB: the flusher waits in front of each flush from here, so the
+	// rotated memtable's log stays on disk; at the level-0 stall the flush has
+	// already named its table and removed the log (BUG-0858's fix).
+	holdFlushesOf(t, opt.Dir)
+
+	committed := map[string][]byte{"in-value-log": make([]byte, 4<<10)}
+	for i := range committed["in-value-log"] {
+		committed["in-value-log"][i] = byte(i)
+	}
+	for i := range 64 {
+		committed[fmt.Sprintf("in-wal-%02d", i)] = []byte(fmt.Sprintf("value %02d", i))
+	}
+	require.NoError(t, db.Update(func(txn *Txn) error {
+		for k, v := range committed {
+			if err := txn.Set([]byte(k), v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	db.vlog.filesLock.RLock()
+	vlogPath := db.vlog.filesMap[db.vlog.maxFid].Fd.Name()
+	db.vlog.filesLock.RUnlock()
+
+	p := parkSyncInActiveWAL(t, db)
+	if pageCacheOf(t, p.walPath).Dirty == 0 {
+		t.Skip("the kernel wrote the WAL back before Sync; this run cannot tell")
+	}
+
+	rotated, err := finishedWithin(async(func() error { return writeUntilRotated(db, p.mt, "during") }))
+	require.NoError(t, err)
+	require.True(t, rotated, "a write that rotates the memtable waited %s for the parked Sync", syncLockStepTimeout)
+	db.lock.RLock()
+	require.Len(t, db.imm, 1)
+	require.Same(t, p.mt, db.imm[0], "the memtable Sync captured is not the one rotated out")
+	db.lock.RUnlock()
+
+	require.NoError(t, p.resume(t))
+
+	require.Equal(t, 1, numImmutables(db), "the rotated memtable was flushed during the test")
+	wal := pageCacheOf(t, p.walPath)
+	require.Zero(t, wal.Dirty, "dirty pages left in the rotated WAL %s after Sync", p.walPath)
+	require.Zero(t, wal.Writeback, "pages under writeback in the rotated WAL %s after Sync", p.walPath)
+	vlog := pageCacheOf(t, vlogPath)
+	require.Zero(t, vlog.Dirty, "dirty pages left in the value log %s after Sync", vlogPath)
+	require.Zero(t, vlog.Writeback, "pages under writeback in the value log %s after Sync", vlogPath)
+
+	image := copyDirImage(t, opt.Dir)
+	reopened, err := Open(opt.WithDir(image).WithValueDir(image))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reopened.Close()) }()
+	require.NoError(t, reopened.View(func(txn *Txn) error {
+		for k, want := range committed {
+			item, err := txn.Get([]byte(k))
+			if err != nil {
+				return fmt.Errorf("%s, committed before Sync, is not in the image: %w", k, err)
+			}
+			got, err := item.ValueCopy(nil)
+			if err != nil {
+				return fmt.Errorf("reading %s from the image: %w", k, err)
+			}
+			if string(got) != string(want) {
+				return fmt.Errorf("%s in the image has a different value", k)
+			}
+		}
+		return nil
+	}))
+}
+
+// TestSyncActiveWALKeepsTheLogThroughAFlush parks Sync in the active
+// memtable's msync, rotates that memtable and lets the flusher write it to
+// level 0 and drop the flusher's reference. Sync's own reference must keep the
+// WAL mapped, open and at its size until Sync has synced it; then Sync's
+// release closes it. (hoardDB, BUG-0858's fix: the flush removes the log's
+// name before its table is in level 0, whatever references the memtable
+// has, so the file is checked through its descriptor, not its name.)
+func TestSyncActiveWALKeepsTheLogThroughAFlush(t *testing.T) {
+	db, _ := openSyncLockTestDB(t, func(o Options) Options { return o.WithNumCompactors(0) })
+	closeAtCleanup(t, db)
+
+	require.NoError(t, writeFill(db, "before", 4))
+	p := parkSyncInActiveWAL(t, db)
+	before, err := os.Stat(p.walPath)
+	require.NoError(t, err)
+
+	flushed, err := finishedWithin(async(func() error {
+		if err := writeUntilRotated(db, p.mt, "during"); err != nil {
+			return err
+		}
+		for numImmutables(db) > 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	require.True(t, flushed, "the captured memtable was not rotated and flushed within %s while Sync was parked",
+		syncLockStepTimeout)
+
+	_, err = os.Stat(p.walPath)
+	require.True(t, os.IsNotExist(err), "the flushed memtable's WAL %s is still named after its flush: %v", p.walPath, err)
+	during, err := p.mt.wal.Fd.Stat()
+	require.NoError(t, err, "the WAL Sync is syncing was closed under it by the flush")
+	require.Equal(t, before.Size(), during.Size(), "the WAL Sync is syncing was truncated under it")
+
+	require.NoError(t, p.resume(t))
+	require.Empty(t, openDescriptorsOf(t, p.walPath), "the flushed memtable's WAL %s outlived Sync's reference", p.walPath)
+}
+
+// TestSyncActiveWALReturnsWhenCloseRacesIt parks Sync in the active memtable's
+// msync and closes the DB. Close must flush the memtable meanwhile (it no
+// longer waits for the msync at db.lock), must not close the value log under
+// the Sync in progress, and must return once Sync does. Sync must return nil
+// and its release must delete the flushed WAL; a Sync after Close refuses; the
+// directory reopens with every committed entry.
+func TestSyncActiveWALReturnsWhenCloseRacesIt(t *testing.T) {
+	db, opt := openSyncLockTestDB(t, func(o Options) Options { return o })
+	require.NoError(t, writeFill(db, "before", 4))
+	require.Zero(t, db.lc.levels[0].numTables(), "a memtable was flushed before the test began")
+	p := parkSyncInActiveWAL(t, db)
+
+	closing := async(db.Close)
+	flushed, err := finishedWithin(async(func() error {
+		for db.lc.levels[0].numTables() == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		return nil
+	}))
+	require.NoError(t, err)
+	if !flushed {
+		require.NoError(t, p.resume(t))
+		_, err = finishedWithin(closing)
+		require.NoError(t, err)
+		t.Fatalf("Close did not flush the memtable within %s while Sync was parked: it waited for the msync",
+			syncLockStepTimeout)
+	}
+	// hoardDB: the flush removed the name (BUG-0858's fix); the parked Sync's
+	// reference keeps the file open and at its size.
+	during, err := p.mt.wal.Fd.Stat()
+	require.NoError(t, err, "Close closed the WAL the parked Sync holds a reference on")
+	require.NotZero(t, during.Size(), "Close truncated the WAL the parked Sync holds a reference on")
+	select {
+	case err := <-closing:
+		t.Fatalf("Close returned (%v) while a Sync was still to sync the value log", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	require.NoError(t, p.resume(t))
+	closed, err := finishedWithin(closing)
+	require.True(t, closed, "Close did not return within %s of the Sync it raced", syncLockStepTimeout)
+	require.NoError(t, err)
+	_, err = os.Stat(p.walPath)
+	require.True(t, os.IsNotExist(err), "the flushed memtable's WAL %s is still named after Close: %v", p.walPath, err)
+	require.Empty(t, openDescriptorsOf(t, p.walPath), "the flushed memtable's WAL %s outlived Sync's reference", p.walPath)
+	require.ErrorIs(t, db.Sync(), ErrDBClosed)
+
+	reopened, err := Open(opt)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reopened.Close()) }()
+	require.NoError(t, reopened.View(func(txn *Txn) error {
+		for b := range 4 {
+			for i := range 64 {
+				if _, err := txn.Get([]byte(fmt.Sprintf("before-%05d-%02d", b, i))); err != nil {
+					return fmt.Errorf("before-%05d-%02d after reopen: %w", b, i, err)
+				}
+			}
+		}
+		return nil
+	}))
+}
+
+// TestSyncActiveWALCaptureIsOneSnapshot guards the invariant that DB.Sync
+// captures the active and the immutable memtables under one read lock. The
+// memtable active at the call is filled so that the next write rotates it, and
+// syncCaptureHook, which runs between the two captures, starts that write and
+// gives it time to finish. Under one lock the rotation waits for Sync's read
+// lock, so the capture is consistent. Split across two locks with the
+// immutables captured first, the rotation moves the memtable into db.imm
+// between the captures, neither capture holds it, and its log, holding entries
+// committed before the call, is left dirty. (Split with the active memtable
+// first, nothing is lost: the rotated memtable is the one already captured.)
+func TestSyncActiveWALCaptureIsOneSnapshot(t *testing.T) {
+	db, _ := openSyncLockTestDB(t, func(o Options) Options {
+		return o.WithNumCompactors(0).WithNumLevelZeroTables(1).WithNumLevelZeroTablesStall(2)
+	})
+	closeAtCleanup(t, db)
+	fillLevelZeroToStall(t, db)
+	// hoardDB: held in front of each flush, as in
+	// TestSyncActiveWALCoversARotationDuringTheSync (BUG-0858's fix).
+	holdFlushesOf(t, db.opt.Dir)
+
+	db.lock.RLock()
+	atCall := db.mt
+	db.lock.RUnlock()
+	// Fill the memtable that is active at the call until the next write rotates it.
+	for b := 0; !atCall.isFull(); b++ {
+		require.Less(t, b, 1000, "the memtable never filled")
+		require.NoError(t, writeFill(db, fmt.Sprintf("before-%04d", b), 1))
+	}
+	walPath := atCall.wal.Fd.Name()
+	if pageCacheOf(t, walPath).Dirty == 0 {
+		t.Skip("the kernel wrote the WAL back before Sync; this run cannot tell")
+	}
+
+	var rotation chan error
+	var once sync.Once
+	syncCaptureHook = func() {
+		once.Do(func() {
+			rotation = async(func() error { return writeFill(db, "rotate", 1) })
+			// Under the one read lock the write cannot rotate and this wait runs
+			// out; split, it rotates in milliseconds.
+			select {
+			case err := <-rotation:
+				rotation <- err
+			case <-time.After(2 * time.Second):
+			}
+		})
+	}
+	t.Cleanup(func() { syncCaptureHook = nil })
+
+	require.NoError(t, db.Sync())
+	done, err := finishedWithin(rotation)
+	require.True(t, done, "the rotating write did not finish once Sync released the lock")
+	require.NoError(t, err)
+	db.lock.RLock()
+	require.Len(t, db.imm, 1)
+	require.Same(t, atCall, db.imm[0], "the memtable active at the call is not the one rotated out")
+	db.lock.RUnlock()
+
+	wal := pageCacheOf(t, walPath)
+	require.Zero(t, wal.Dirty, "dirty pages left in %s, the WAL of the memtable active when Sync was called: "+
+		"a rotation between the captures took it out of both", walPath)
+	require.Zero(t, wal.Writeback, "pages under writeback in %s after Sync", walPath)
+}

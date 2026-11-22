@@ -1,0 +1,19 @@
+> create bucket Photos { type: hash, Comments fifoStore, Shots blobStore }
+OK  created bucket app.Photos (type hash, whole)
+Stores: 2 store field(s) declared
+> describe bucket Photos
+BUCKET app.Photos
+---
+Type:               hash
+Entries:            0
+Logical size:       0 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            (none — declare them when you create the bucket)
+Stores:             (elements summed over every document)
+  Comments     fifoStore  0 element(s)
+  Shots        blobStore  0 element(s)
+> create bucket Plain { type: hash, Caption string }
+OK  created bucket app.Plain (type hash, whole)
+note: field types on scalar fields (Caption string) are not enforced in this release; only store fields are created.

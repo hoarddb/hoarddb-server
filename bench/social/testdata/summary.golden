@@ -1,0 +1,54 @@
+hoardDB certification summary (perf-record/2)
+CAVEAT (1) These guests complete a synced 4 KiB write in 3.6 to 4.3 ms, about 250 syncs a second; replicated hoardDB and MySQL pay two sequential syncs before the acknowledgement (owner, then replica), MongoDB journals on the members in parallel; none of it transfers to local NVMe, where a sync costs tens of microseconds.
+CAVEAT (2) The virtual disk's write-back caching behaviour was not verified.
+CAVEAT (3) The host has a hybrid-core CPU; its effect is visible only through the canary.
+CAVEAT (4) The fsync sidecar adds one synced write per second per server VM.
+CAVEAT (5) The development database that calibrates 16.4 is a development database.
+LIMITATION same-vm-repeats: the median of three is of back-to-back repeats on one VM (no engine-to-VM rotation); a slow guest is not separated from the engine. Applies to: C1/hoarddb, C1/mongo.
+
+TABLE 1 per configuration: config C1, mix RH, dataset S-100k, depth 64, level L-A, routing RP-A, loop closed (closed-loop p99, affected by coordinated omission)
+engine   placement           median-basis  repeats  ops/s  range       ops/s all repeats  reads/s  writes/s  read p50  read p95  read p99  read p99.9  write p50  write p95  write p99  write p99.9  fsync p99 ms  server CPU p95  top5 shard share  client CPU p95  req/op  copies below factor  offered  utilisation  labels
+hoarddb  single (one owner)  same-vm       3        1000   1000..1000  -                  800      200       1.50      3.00      9.00      18.0        4.00       8.00       20.0       40.0         4.40          VM1=51.0        -                 VM7=40.0        2.00    -                    -        -            same-vm-repeats
+mongo    single              same-vm       3        1000   1000..1000  -                  800      200       2.20      4.40      11.0      22.0        4.00       8.00       20.0       40.0         4.40          VM1=51.0        -                 VM7=40.0        2.00    -                    -        -            same-vm-repeats
+
+TABLE 1 per configuration: config C1, mix RH, dataset S-100k, depth 64, level L-A, routing RP-A, loop open
+engine   placement                         median-basis  repeats  ops/s  range       ops/s all repeats  reads/s  writes/s  read p50  read p95  read p99  read p99.9  write p50  write p95  write p99  write p99.9  fsync p99 ms  server CPU p95  top5 shard share  client CPU p95  req/op  copies below factor  offered  utilisation  labels
+hoarddb  single (one owner) [rate common]  single        1        1000   1000..1000  -                  800      200       1.50      3.00      9.00      18.0        4.00       8.00       20.0       40.0         4.40          VM1=55.0        -                 VM7=40.0        2.00    -                    500      0.400        steal
+
+TABLE 1 per configuration: config C1, mix WH, dataset S-100k, depth 64, level L-R, routing RP-B, loop closed (closed-loop p99, affected by coordinated omission); MySQL semi-sync: replica has received and flushed; hoardDB: replica has applied; MongoDB: majority commit point
+engine   placement           median-basis  repeats  ops/s  range       ops/s all repeats  reads/s  writes/s  read p50  read p95  read p99  read p99.9  write p50  write p95  write p99  write p99.9  fsync p99 ms  server CPU p95  top5 shard share  client CPU p95  req/op  copies below factor  offered  utilisation  labels
+hoarddb  single (one owner)  single        1        1000   1000..1000  -                  800      200       1.50      3.00      9.00      18.0        4.00       8.00       20.0       40.0         4.40          VM1=55.0        -                 VM7=40.0        2.00    -                    -        -
+
+TABLE 1 per configuration: config C3, mix WH, dataset S-100k, depth 64, level L-R, routing RP-B, loop closed (closed-loop p99, affected by coordinated omission); MySQL semi-sync: replica has received and flushed; hoardDB: replica has applied; MongoDB: majority commit point
+engine   placement           median-basis  repeats  ops/s  range       ops/s all repeats  reads/s  writes/s  read p50  read p95  read p99  read p99.9  write p50  write p95  write p99  write p99.9  fsync p99 ms  server CPU p95  top5 shard share  client CPU p95  req/op  copies below factor  offered  utilisation  labels
+hoarddb  single (one owner)  single        1        2400   2400..2400  -                  800      200       1.50      3.00      9.00      18.0        4.00       8.00       20.0       40.0         4.40          VM1=55.0        -                 VM7=40.0        2.00    -                    -        -
+
+TABLE 2 per operation: config C1, mix RH, depth 64, level L-A, routing RP-A, loop closed (closed-loop p99, affected by coordinated omission)
+operation  engine   placement           requests/op  p50   p99   p99.9
+R1         hoarddb  single (one owner)  2.00         1.00  5.00  10.0
+R1         mongo    single              2.00         1.00  5.00  10.0
+
+TABLE 2 per operation: config C1, mix RH, depth 64, level L-A, routing RP-A, loop open
+operation  engine   placement                         requests/op  p50   p99   p99.9
+R1         hoarddb  single (one owner) [rate common]  2.00         1.00  5.00  10.0
+
+TABLE 2 per operation: config C1, mix WH, depth 64, level L-R, routing RP-B, loop closed (closed-loop p99, affected by coordinated omission); MySQL semi-sync: replica has received and flushed; hoardDB: replica has applied; MongoDB: majority commit point
+operation  engine   placement           requests/op  p50   p99   p99.9
+R1         hoarddb  single (one owner)  2.00         1.00  5.00  10.0
+
+TABLE 2 per operation: config C3, mix WH, depth 64, level L-R, routing RP-B, loop closed (closed-loop p99, affected by coordinated omission); MySQL semi-sync: replica has received and flushed; hoardDB: replica has applied; MongoDB: majority commit point
+operation  engine   placement           requests/op  p50   p99   p99.9
+R1         hoarddb  single (one owner)  2.00         1.00  5.00  10.0
+
+TABLE 3 scaling: engine hoarddb, mix WH, depth 64, loop closed, placement single (one owner)
+nodes  config  level  routing  ops/s  copies/nodes
+1      C1      L-R    RP-B     1000   1/1
+3      C3      L-R    RP-B     2400   3/3
+
+TABLE 6 fsyncs per acknowledged write (from /proc/diskstats)
+engine   level  config  fsyncs/ack
+hoarddb  L-A    C1      1.01
+
+INTEGRITY FAILURES (the comparison is invalid for these legs)
+leg                                     failures
+C1 hoarddb single RH depth 64 L-A open  tls check failed

@@ -1,0 +1,14 @@
+[h]oardDB [app]> create bucket Profile { Name string, FollowerCount int, FollowingCount int, Posts fifoStore }
+OK  created bucket app.Profile (4 fields)
+Fields: Name string, FollowerCount int, FollowingCount int, Posts fifoStore
+[h]oardDB [app]> describe bucket Profile
+BUCKET app.Profile
+---
+Id:                  <BUCKET-ID.....>
+State:               active
+Declaration version: 1
+Fields:              (in declaration order)
+  Name           string
+  FollowerCount  int
+  FollowingCount int
+  Posts          fifoStore

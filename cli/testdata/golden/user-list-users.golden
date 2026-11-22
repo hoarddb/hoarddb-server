@@ -1,0 +1,5 @@
+> user list
+USERS (master:  at <ADDR>, config version 2)
+---
+admin: enabled, roles [root@*], epoch 0
+bob: enabled, roles [reader@app], epoch 0

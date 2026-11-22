@@ -1,0 +1,6 @@
+> use app
+Switched to database 'app'
+> use nope
+Error: database "nope" not found — available: app (or 'create database nope')
+> use
+Error: parse: usage: use <database>

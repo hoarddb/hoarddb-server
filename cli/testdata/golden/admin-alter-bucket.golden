@@ -1,0 +1,24 @@
+> alter bucket Post { Notes lifoStore }
+OK  bucket "Post" now declares: Comments (fifo), Tags (hash), Notes (lifo)
+> describe bucket Post
+BUCKET app.Post
+---
+Type:               hash
+Entries:            1
+Logical size:       345 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            (none — declare them when you create the bucket)
+Stores:             (elements summed over every document)
+  Comments     fifoStore  1 element(s)
+  Tags         hashStore  1 element(s)
+  Notes        lifoStore  0 element(s)
+> alter bucket Post { Email string unique }
+Error: alter bucket Post cannot add a unique index (Email): this release declares indexes only when a bucket is created:
+         create bucket Post { type: hash, Email string unique }
+       to add one to an existing bucket, drop and recreate it; note that dropping deletes its data: 'drop bucket Post'
+> alter bucket Post { Comments drop }
+Error: removing a store field is not supported in 1.0 (Comments drop): it would destroy every document's elements of it in "Post" with no preview and no undo. alter bucket only adds store fields: alter bucket Post { Tags hashStore }
+> alter bucket Nope { Notes lifoStore }
+Error: alter bucket Nope: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

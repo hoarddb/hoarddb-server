@@ -1,0 +1,86 @@
+[h]oardDB> show databases
+DATABASES
+---
+(no databases yet — create one with 'create database <name>')
+[h]oardDB> create database app
+OK  created database app (replication factor 1, this node's default)
+Next: use app
+Then: create bucket <name> { Name string, Purchases fifoStore }   (declare every field)
+[h]oardDB> create database shop { replication_factor: 1 }
+OK  created database shop (replication factor 1)
+Next: use shop
+Then: create bucket <name> { Name string, Purchases fifoStore }   (declare every field)
+[h]oardDB> show databases
+DATABASES
+---
+NAME  ID                REPLICATION
+app   <BUCKET-ID.....>  rf 1
+shop  <BUCKET-ID.....>  rf 1
+[h]oardDB> show databases limit 1
+DATABASES
+---
+NAME  ID                REPLICATION
+app   <BUCKET-ID.....>  rf 1
+more: show databases limit 1 cursor 617070
+[h]oardDB> use app
+Switched to database 'app'
+[h]oardDB [app]> show buckets
+BUCKETS in app
+---
+(no buckets yet — create one with 'create bucket <name> in app { Name string }')
+[h]oardDB [app]> describe database app
+DATABASE app
+---
+Id:                 <BUCKET-ID.....>
+Replication factor: 1
+Storage:            disk
+Buckets:            0
+[h]oardDB [app]> create bucket User { Name string, Age int, Joined datetime, Purchases fifoStore, Friends hashStore }
+OK  created bucket app.User (5 fields)
+Fields: Name string, Age int, Joined datetime, Purchases fifoStore, Friends hashStore
+[h]oardDB [app]> show buckets
+BUCKETS in app
+---
+NAME  ID                STATE
+User  <BUCKET-ID.....>  active
+[h]oardDB [app]> describe database app
+DATABASE app
+---
+Id:                 <BUCKET-ID.....>
+Replication factor: 1
+Storage:            disk
+Buckets:            1
+
+NAME  ID                STATE
+User  <BUCKET-ID.....>  active
+[h]oardDB [app]> describe database app limit 1
+DATABASE app
+---
+Id:                 <BUCKET-ID.....>
+Replication factor: 1
+Storage:            disk
+Buckets:            1 on this page, more follow
+
+NAME  ID                STATE
+User  <BUCKET-ID.....>  active
+more: describe database app limit 1 cursor <CURSOR>
+[h]oardDB [app]> describe bucket User
+BUCKET app.User
+---
+Id:                  <BUCKET-ID.....>
+State:               active
+Declaration version: 1
+Fields:              (in declaration order)
+  Name         string
+  Age          int
+  Joined       datetime
+  Purchases    fifoStore
+  Friends      hashStore
+[h]oardDB [app]> describe bucket Nope
+Error: NOT_FOUND: bucket "Nope" not found in database "app": the declaration fetch returned no document under that name in app._buckets. Run 'show buckets in app' to list what exists, or 'create bucket Nope { <Field> string }' to create it
+[h]oardDB [app]> use nope
+Error: NOT_FOUND: database "nope" not found. Run 'show databases' to list what exists, or 'create database nope' to create it
+[h]oardDB [app]> show buckets in nope
+Error: NOT_FOUND: database "nope" not found. Run 'show databases' to list what exists, or 'create database nope' to create it
+[h]oardDB [app]> describe database nope
+Error: NOT_FOUND: database "nope" not found. Run 'show databases' to list what exists, or 'create database nope' to create it

@@ -1,0 +1,80 @@
+package server
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"hoardDB/storage"
+	"hoardDB/transport"
+)
+
+// Throwaway: generates the pre-origin WAL fixture from the starting tree.
+func TestZZGenerateLegacyFixture(t *testing.T) {
+	out := os.Getenv("FIXTURE_OUT")
+	if out == "" {
+		t.Skip("FIXTURE_OUT not set")
+	}
+	tc := newTestCluster(t, 3, 3)
+	defer tc.stop()
+
+	tc.ok(0, transport.OpCreateDB, CreateDatabaseRequest{Name: testDatabase})
+	tc.ok(0, transport.OpCreateBucket, CreateBucketRequest{Database: testDatabase, Name: testBucket, Type: BucketTypeFIFO})
+	for i := 0; i < 5; i++ {
+		frame := tc.ok(0, transport.OpFIFOPush, PushRequest{
+			Database: testDatabase, Bucket: testBucket,
+			Data: map[string]interface{}{"n": i}, WriteConcern: "all",
+		})
+		if frame.Opcode == transport.OpError {
+			t.Fatalf("push %d: %s", i, frame.Payload)
+		}
+	}
+	owner, err := tc.nodes[0].server.core.cluster.Owner(placementOf(testDatabase, testBucket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicaIndex := -1
+	for i := range tc.nodes {
+		if tc.addrs[i] != owner.ID {
+			replicaIndex = i
+			break
+		}
+	}
+	waitForWALSequence(t, tc.nodes[replicaIndex], 7)
+	walDir := filepath.Join(tc.nodes[replicaIndex].cfg.Storage.DataDir, "wal")
+	tc.stop()
+
+	segment, err := os.ReadFile(filepath.Join(walDir, "wal_00001.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "wal-segment-before-origin.bin"), segment, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, err := storage.OpenWAL(walDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := w.ReadFrom(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type row struct {
+		Seq    uint64 `json:"seq"`
+		Op     byte   `json:"op"`
+		Bucket string `json:"bucket"`
+		Key    string `json:"key_hex"`
+		Data   string `json:"data_hex"`
+	}
+	var rows []row
+	for _, e := range entries {
+		rows = append(rows, row{e.Seq, e.Op, e.Bucket, hex.EncodeToString(e.Key), hex.EncodeToString(e.Data)})
+	}
+	js, _ := json.MarshalIndent(rows, "", "  ")
+	if err := os.WriteFile(filepath.Join(out, "wal-segment-before-origin.json"), append(js, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("wrote %d bytes, %d entries from %s", len(segment), len(rows), walDir)
+}

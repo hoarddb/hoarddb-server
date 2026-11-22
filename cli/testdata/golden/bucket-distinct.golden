@@ -1,0 +1,7 @@
+> db.Users.distinct("n")
+1
+9
+> db.Users.distinct("zz")
+NO DISTINCT VALUES
+> db.Nope.distinct("n")
+Error: distinct failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

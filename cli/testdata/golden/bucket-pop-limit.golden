@@ -1,0 +1,30 @@
+> db.Jobs.pop({limit: 2})
+{"_id_": "<ID>", "task": "x"}
+{"_id_": "<ID>", "task": "y"}
+> db.Jobs.peek({limit: 9})
+{"_id_": "<ID>", "task": "z"}
+{"_id_": "<ID>", "task": "w"}
+{"_id_": "<ID>", "task": "v"}
+> db.Jobs.pop({limit: 9})
+{"_id_": "<ID>", "task": "z"}
+{"_id_": "<ID>", "task": "w"}
+{"_id_": "<ID>", "task": "v"}
+> db.Jobs.pop({limit: 2})
+EMPTY  queue is empty
+> db.Stack.pop({limit: 2})
+{"_id_": "<ID>", "n": 5}
+{"_id_": "<ID>", "n": 4}
+> db.Tasks.pop({limit: 2})
+{"_id_": "<ID>", "task": "u"}
+{"_id_": "<ID>", "task": "w"}
+> db.Jobs.pop(3)
+Error: pop(3) is not supported: the count goes in an option document.
+       Use db.Jobs.pop({limit: 3}) to remove and return the next 3.
+> db.Jobs.pop({limit: 0})
+Error: pop's limit is a whole number of 1 or more, as in db.Jobs.pop({limit: 3}); got 0
+> db.Jobs.pop({lmit: 3})
+Error: pop has one option, limit, and "lmit" is not it: db.Jobs.pop({limit: 3}) removes and returns the next 3
+> db.Jobs.pop({limit: 101})
+Error: pop failed: server error (4): invalid pop limit: 101 is above the pop maximum of 100. A pop removes what it returns, so it takes at most 100 at a time: repeat pop({limit: 100}), or read them without removing any with peek({limit: 101})
+> db.Users.pop({limit: 2})
+Error: pop failed: server error (4): pop is not defined for hash buckets: a hash has no order to take from, so there is no "next" to remove. Remove one with delete("<key>"), or read them with get("<key>") or find(). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.

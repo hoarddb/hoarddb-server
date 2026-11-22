@@ -1,0 +1,8 @@
+> create bucket Scratch { type: hash }
+OK  created bucket app.Scratch (type hash, whole)
+> create bucket Scratch { type: hash }
+OK  bucket "Scratch" already exists (type: hash)
+> create bucket Queue { type: lifo }
+OK  created bucket app.Queue (type lifo)
+> create bucket Bad { type: nope }
+Error: unknown bucket type "nope" — valid types: hash, btree, fifo, lifo, heap, blob

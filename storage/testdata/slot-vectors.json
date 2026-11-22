@@ -1,0 +1,47 @@
+{
+ "comment": "Frozen storage-slot vectors for the v1.1 entry-ring layout (conventions §3 table, placement §2). placement_key_hex is uvarint(len(database)) || database || uvarint(len(bucket)) || bucket || encid_hex, where encid_hex is EncodeComponent(_id_). slot is uint16(xxhash64(placement key) >> 51), 13 bits. The rows were computed from the spec's byte layout, not from the code under test; a changed row moves every document it covers. The two last rows break a missing length prefix.",
+ "vectors": [
+  {
+   "database": "app",
+   "bucket": "Person",
+   "encid_hex": "5070310000",
+   "placement_key_hex": "0361707006506572736f6e5070310000",
+   "slot": 4962
+  },
+  {
+   "database": "app",
+   "bucket": "Users",
+   "encid_hex": "506164610000",
+   "placement_key_hex": "03617070055573657273506164610000",
+   "slot": 5737
+  },
+  {
+   "database": "app",
+   "bucket": "Users",
+   "encid_hex": "10",
+   "placement_key_hex": "0361707005557365727310",
+   "slot": 4259
+  },
+  {
+   "database": "",
+   "bucket": "",
+   "encid_hex": "50780000",
+   "placement_key_hex": "000050780000",
+   "slot": 1089
+  },
+  {
+   "database": "a",
+   "bucket": "bc",
+   "encid_hex": "10",
+   "placement_key_hex": "016102626310",
+   "slot": 16
+  },
+  {
+   "database": "ab",
+   "bucket": "c",
+   "encid_hex": "10",
+   "placement_key_hex": "026162016310",
+   "slot": 7264
+  }
+ ]
+}

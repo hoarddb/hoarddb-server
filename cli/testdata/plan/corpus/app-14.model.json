@@ -1,0 +1,118 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-14",
+ "kinds": [
+  {
+   "name": "message",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "rid",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "room",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "room",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "subscription",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "room_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "room",
+      "resolve_permille": 1000
+     }
+    },
+    {
+     "name": "user_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "user",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "user",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "subscription",
+   "by": [
+    "room_id"
+   ]
+  },
+  {
+   "op": "list",
+   "coll": "subscription",
+   "by": [
+    "user_id"
+   ],
+   "visibility": "container"
+  },
+  {
+   "op": "list",
+   "coll": "user",
+   "substring": true
+  },
+  {
+   "op": "join",
+   "coll": "message",
+   "join": {
+    "to": "room",
+    "on": "room",
+    "kind": "aggregate"
+   },
+   "surface": "admin"
+  }
+ ]
+}

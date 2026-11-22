@@ -1,0 +1,94 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-11",
+ "kinds": [
+  {
+   "name": "project",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "reader_refs",
+     "type": "array",
+     "present_permille": 1000,
+     "ref": {
+      "to": "user",
+      "resolve_permille": 1000
+     },
+     "array": {
+      "len_p50": 3,
+      "len_p95": 9,
+      "len_max": 20,
+      "elem_is_document": false
+     }
+    }
+   ]
+  },
+  {
+   "name": "user",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "subscription",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "history",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "project",
+   "by": [
+    "reader_refs"
+   ],
+   "visibility": "membership"
+  },
+  {
+   "op": "update",
+   "coll": "subscription",
+   "atomic_with": "subscription-tx"
+  },
+  {
+   "op": "update",
+   "coll": "history",
+   "atomic_with": "history-tx"
+  }
+ ]
+}

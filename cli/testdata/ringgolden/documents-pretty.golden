@@ -1,0 +1,27 @@
+[h]oardDB [app]> set pretty on
+pretty is now on for documents printed from now on.
+[h]oardDB [app]> db.User["ada"].get()
+{
+  "Age": 36,
+  "Joined": "2024-08-24T04:57:21.295Z",
+  "Name": "Ada",
+  "_id_": "ada"
+}
+[h]oardDB [app]> db.User.list()
+{
+  "Age": 36,
+  "Joined": "2024-08-24T04:57:21.295Z",
+  "Name": "Ada",
+  "_id_": "ada"
+}
+[h]oardDB [app]> db.User["ada"].Purchases.push({Item: "coffee", Qty: 2})
+OK  pushed: Purchases now holds 1 element
+[h]oardDB [app]> db.User["ada"].Purchases.peek()
+{
+  "Item": "coffee",
+  "Qty": 2
+}
+[h]oardDB [app]> set pretty off
+pretty is now off for documents printed from now on.
+[h]oardDB [app]> db.User["ada"].get()
+{"Age": 36, "Joined": "2024-08-24T04:57:21.295Z", "Name": "Ada", "Purchases": "fifoStore (1 element)", "_id_": "ada"}

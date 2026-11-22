@@ -1,0 +1,10 @@
+> connect
+Error: parse: usage: connect <address>
+> connect 127.0.0.1:1
+WARNING: TLS certificate verification is disabled (--insecure); the connection to 127.0.0.1:1 cannot be trusted and may be intercepted. Use this only against a local development server.
+Error: connect 127.0.0.1:1: connect to 127.0.0.1:1: dial 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused (the session is still connected to <ADDR>)
+> show databases
+DATABASES
+---
+NAME  BUCKETS
+app   7

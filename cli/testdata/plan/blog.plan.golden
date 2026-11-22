@@ -1,0 +1,126 @@
+<!-- hoarddb-plan v1 -->
+# hoardDB plan
+
+A suggestion, not a change: nothing here was created, and you pick every structure.
+
+## 1. Inputs
+
+- source: dump; thresholds version 1
+- comments: 24,000 documents (24,000 sampled)
+- posts: 2,000 documents (2,000 sampled)
+- users: 200 documents (200 sampled)
+- trace: 4 lines
+
+## 2. Scorecard
+
+| # | Rule | Cell | Finding |
+| --- | --- | --- | --- |
+| 1 | dynamic filters | P | none found |
+| 2 | client sorting | P | none found |
+| 3 | non-reducible joins | P | none found |
+| 4 | permissions in the query | P | none found |
+| 5 | atomic multi-entity writes | P | none found |
+
+P is a pass, p is partial (admin surface only, or a sort that comes from a setting), F is a fail.
+
+### Verdict: yes
+
+#### Confidence and limits
+
+No rule found a trace line to count against.
+This verdict is built on what the inputs claim: the sample, the model and the trace. It does not see how often each read runs (only the `weight` you gave), which lines are on the admin surface (only the `surface` you gave), the counts and fans you supplied, or any query you left out. A line left out can only make the verdict kinder.
+To change a verdict, change the design the trace describes and then update the trace. Editing a line to move a cell changes the claim, not the application.
+
+## 3. Query reductions
+
+- key read (trace line 1)
+  - source: `get users by _id`
+  - hoardDB: `db.User["<id>"].get()`
+  - cost: seek
+- child rows by parent key, ordered (trace line 2)
+  - source: `list comments by post_id sort ts:asc limit 20`
+  - hoardDB: `db.Post["<id>"].Comments.list({limit: 20})  (fifoStore)`
+  - cost: seek
+- read across owners (trace line 4)
+  - source: `list comments by author_id sort ts:desc limit 10`
+  - hoardDB: `not served by the store field; choose the bucket design`
+  - cost: scan  needs indexes (not available yet)
+
+## 4. Kinds and suggestions
+
+### Post (from posts; grade: conflict)
+
+- Comments is a store field (fifoStore; grade: conflict), from comments
+  - [S1] comments has _id in every sampled document: the key
+  - [S5] comments.author_id refers to users (1000 per mille resolve)
+  - [T6] trace line 4 reads comments by author_id: a read across owners, so a bucket
+  - [S5] comments.post_id refers to posts (999 per mille resolve)
+  - [S6] comments refers only to posts through post_id (999 per mille resolve) and nothing refers to comments: a candidate owned collection of posts
+  - [T2] trace line 2 lists comments within one document of posts sorted ts:asc
+  - alternatives: bucket Comment; both: Comments and a Comment bucket written twice
+- [S1] posts has _id in every sampled document: the key
+- [S1] posts.title is distinct in every sampled document (present in 1000 per mille): unique
+- open choice: comments.placement
+
+### User (from users; grade: trace)
+
+- Avatar is a store field (blobStore; grade: shape), from users.avatar
+  - [S4] users.avatar is 180000 bytes at the median, at or above the 65536-byte blob boundary
+- [S1] users has _id in every sampled document: the key
+- [T1] trace line 1 reads users by _id
+- [S1] users.email is distinct in every sampled document (present in 1000 per mille): unique
+- [S1] users.name is distinct in every sampled document (present in 1000 per mille): unique
+
+## 5. Will not port
+
+Nothing in the inputs is outside what hoardDB serves.
+
+## 6. Cost
+
+Computed from the formats, not measured. A bucket costs no file, descriptor, mapping or goroutine.
+
+| Design | Buckets | Store fields | Declaration bytes | Documents | Store elements | Keys per document |
+| --- | --- | --- | --- | --- | --- | --- |
+| Design A (as suggested) | 2 | 2 | 924 | 2,200 | 24,000 | Post 1+5+12, User 1+2+0 |
+| Design B (each conflict as its own bucket) | 3 | 1 | 1334 | 26,200 | 0 | Post 1+5+0, User 1+2+0 |
+| Design C (both: store field and bucket, written twice) | 3 | 2 | 1360 | 26,200 | 24,000 | Post 1+5+12, User 1+2+0 |
+
+Design A (as suggested): reads that scan today or cannot be served: not possible with the store field: list comments by author_id sort ts:desc limit 10 (weight 1)
+
+Design B (each conflict as its own bucket): reads that scan today or cannot be served: scan of every comments document: list comments by post_id sort ts:asc limit 20 (weight 10); scan: list comments by author_id sort ts:desc limit 10 (weight 1)
+
+Design C (both: store field and bucket, written twice): reads that scan today or cannot be served: scan of every comments document: list comments by post_id sort ts:asc limit 20 (weight 10); scan: list comments by author_id sort ts:desc limit 10 (weight 1)
+
+## 7. HQL
+
+1 choice is open; this section has more than one statement for `Comment`. Pick one.
+
+### Post
+
+```text
+create bucket Post { AuthorId string, Body string, CreatedAt datetime, Tags array, Title string, Comments fifoStore }
+-- not available yet: unique Title (a unique field cannot be declared at create)
+```
+
+### Comment (alternative: Comments as its own bucket)
+
+```text
+create bucket Comment { AuthorId string, Body string, PostId string, Ts datetime }
+-- instead of the Comments field above; with both, keep Post and add this bucket
+-- not available yet: index Comment.AuthorId (list filters scan)
+```
+
+### User
+
+```text
+create bucket User { Email string, Name string, Avatar blobStore }
+-- cannot be written on this build: blobStore has no put yet; alternative: the pointer layout of large-files.md
+-- not available yet: unique Email (a unique field cannot be declared at create)
+-- not available yet: unique Name (a unique field cannot be declared at create)
+```
+
+## Next
+
+1. In a hoardDB shell, pick a database: `create database app`, then `use app`.
+2. Run the statement you picked for each bucket.
+3. Load each file into its bucket: `hoarddb ingest <file> --into app.<bucket>`.

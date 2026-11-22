@@ -1,0 +1,8 @@
+> consistent-get app Users solo
+{"_id_": "solo"}
+> consistent-get app Users zz
+not found
+> consistent-get app Nope u1
+Error: consistent get u1: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it
+> consistent-get app Users
+Error: parse: usage: consistent-get <database> <bucket> <key>

@@ -1,0 +1,18 @@
+> db.Jobs.peek({limit: 2})
+{"_id_": "<ID>", "task": "x"}
+{"_id_": "<ID>", "task": "y"}
+> db.Jobs.peek({limit: 9})
+{"_id_": "<ID>", "task": "x"}
+{"_id_": "<ID>", "task": "y"}
+{"_id_": "<ID>", "task": "z"}
+> db.Tasks.peek({limit: 2})
+{"_id_": "<ID>", "task": "u"}
+{"_id_": "<ID>", "task": "v"}
+> db.Jobs.peek({limit: 0})
+Error: peek's limit is a whole number of 1 or more, as in db.Jobs.peek({limit: 3}); got 0
+> db.Jobs.peek({limit: "3"})
+Error: peek's limit is a whole number of 1 or more, as in db.Jobs.peek({limit: 3}); got "3"
+> db.Jobs.peek({lmit: 3})
+Error: peek has one option, limit, and "lmit" is not it: db.Jobs.peek({limit: 3}) reads the next 3 without removing them
+> db.Users.peek({limit: 2})
+Error: peek failed: server error (4): peek is not defined for hash buckets: a hash has no order to take from, so there is no "next" to look at. Read one with get("<key>") or several with find(). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.

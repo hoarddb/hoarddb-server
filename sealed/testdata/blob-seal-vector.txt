@@ -1,0 +1,27 @@
+size 65536
+  file length      65588
+  chunks           1
+  file sha256      afda251219ddfba8ca45c17b110a1abc07358b161d370a4aae25efac4b39629c
+  header           004844420206000000000000000001020000000000000000
+  first nonce      a0a1a2a3a4a5a6a7a8a9aaab
+  first tag        fd29815283595a72c1e9adb60d19245d
+  last nonce       a0a1a2a3a4a5a6a7a8a9aaab
+  last tag         fd29815283595a72c1e9adb60d19245d
+size 65537
+  file length      65617
+  chunks           2
+  file sha256      3ed5f7e860ea49ad982bf1884d1cb62203e5d103473521aa9642757df7f3520f
+  header           004844420206000000000000000001020000000000000000
+  first nonce      a0a1a2a3a4a5a6a7a8a9aaab
+  first tag        caac9a45244a1b8c79fdcd933b5e4ebb
+  last nonce       acadaeafb0b1b2b3b4b5b6b7
+  last tag         b1c4b10be59c1329ec0b5bcbad212211
+size 131072
+  file length      131152
+  chunks           2
+  file sha256      d5fc18915e59d854ac2f51cd0e5d84f0d35c130bac18ac70a346c30512fab1c9
+  header           004844420206000000000000000001020000000000000000
+  first nonce      a0a1a2a3a4a5a6a7a8a9aaab
+  first tag        caac9a45244a1b8c79fdcd933b5e4ebb
+  last nonce       acadaeafb0b1b2b3b4b5b6b7
+  last tag         b9b1cb56221973c494f7c75349a62d26

@@ -1,0 +1,168 @@
+> db.Work.dead()
+(no dead entries)
+> db.Work.claim({limit: 3})
+{"_id_": "<ID>", "n": 1}
+{"_id_": "<ID>", "n": 2}
+{"_id_": "<ID>", "n": 3}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>", "<HANDLE>"]
+> db.Work.release({lease_id: "{LEASE}"})
+released 3
+> db.Work.claim({limit: 3})
+{"_id_": "<ID>", "n": 1}
+{"_id_": "<ID>", "n": 2}
+{"_id_": "<ID>", "n": 3}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>", "<HANDLE>"]; deliveries [2, 2, 2]
+> db.Work.release({lease_id: "{LEASE}"})
+released 3
+> db.Work.claim({limit: 3})
+{"_id_": "<ID>", "n": 1}
+{"_id_": "<ID>", "n": 2}
+{"_id_": "<ID>", "n": 3}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>", "<HANDLE>"]; deliveries [3, 3, 3]
+> db.Work.release({lease_id: "{LEASE}"})
+released 3
+> db.Work.claim({limit: 3})
+{"_id_": "<ID>", "n": 1}
+{"_id_": "<ID>", "n": 2}
+{"_id_": "<ID>", "n": 3}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>", "<HANDLE>"]; deliveries [4, 4, 4]
+> db.Work.release({lease_id: "{LEASE}"})
+released 3
+> db.Work.claim({limit: 3})
+{"_id_": "<ID>", "n": 1}
+{"_id_": "<ID>", "n": 2}
+{"_id_": "<ID>", "n": 3}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>", "<HANDLE>"]; deliveries [5, 5, 5]
+> db.Work.release({lease_id: "{LEASE}"})
+released 3
+> db.Work.claim()
+EMPTY  queue is empty (3 entries are dead-lettered; see db.Work.dead())
+> db.Work.len()
+0  (3 entries are dead-lettered; see db.Work.dead())
+> db.Work.dead()
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 1}}
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 2}}
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 3}}
+> db.Work.dead({limit: 2})
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 1}}
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 2}}
+more: db.Work.dead({limit: 2, after: "<HANDLE>"})
+> db.Work.dead({limit: 2, after: "{DEAD2}"})
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 3}}
+> db.Work.dead({after: "{DEAD1}"})
+(no dead entries after "<HANDLE>")
+> describe bucket Work
+BUCKET app.Work
+---
+Type:               fifo
+Entries:            0
+Logical size:       474 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Indexes:            (none — declare them when you create the bucket)
+
+db.Work has 3 dead entries (claimed 5 times without an acknowledgement).
+  Read them:     db.Work.dead()
+  Retry them:    db.Work.requeue({all: true})
+  Drop them:     db.Work.discard({all: true})
+> show buckets
+BUCKETS in app
+---
+Encrypted: no (this node's store; the same for every bucket)
+NAME    TYPE   ENTRIES  REPLICATION
+Emails  hash   1        rf 1 (inherited)
+Events  btree  1        rf 1 (inherited)
+Files   blob   1        rf 1 (inherited)
+Jobs    fifo   1        rf 1 (inherited)
+Post    hash   1        rf 1 (inherited)
+Slots   heap   1        rf 1 (inherited)
+Tasks   heap   1        rf 1 (inherited)
+Users   hash   2        rf 1 (inherited)
+Work    fifo   0        rf 1 (inherited)
+
+db.Work has 3 dead entries (claimed 5 times without an acknowledgement).
+  Read them:     db.Work.dead()
+  Retry them:    db.Work.requeue({all: true})
+  Drop them:     db.Work.discard({all: true})
+> db.Work.dead()
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 1}}
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 2}}
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 3}}
+> db.Work.requeue({dead_id: "{DEAD1}"})
+requeued 1
+> db.Work.requeue({dead_id: "{DEAD1}"})
+Error: no dead entry "<HANDLE>" in app.Work: it may have been requeued or discarded already.
+  List what is there: db.Work.dead()
+> db.Work.claim()
+{"_id_": "<ID>", "n": 1}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>"]
+> db.Work.discard({dead_id: "{DEAD2}"})
+discarded 1
+> db.Work.dead()
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "<ID>", "n": 3}}
+> db.Work.discard({all: true})
+discarded 1
+> db.Work.dead()
+(no dead entries)
+> db.Work.requeue({all: true})
+requeued 0
+> db.Slots.claim()
+{"_id_": "job-7", "n": 1}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>"]
+> db.Slots.release({lease_id: "{LEASE}"})
+released 1
+> db.Slots.claim()
+{"_id_": "job-7", "n": 1}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>"]; deliveries [2]
+> db.Slots.release({lease_id: "{LEASE}"})
+released 1
+> db.Slots.claim()
+{"_id_": "job-7", "n": 1}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>"]; deliveries [3]
+> db.Slots.release({lease_id: "{LEASE}"})
+released 1
+> db.Slots.claim()
+{"_id_": "job-7", "n": 1}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>"]; deliveries [4]
+> db.Slots.release({lease_id: "{LEASE}"})
+released 1
+> db.Slots.claim()
+{"_id_": "job-7", "n": 1}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>"]; deliveries [5]
+> db.Slots.release({lease_id: "{LEASE}"})
+released 1
+> db.Slots.push({"_id_": "job-7", "priority": 3, "n": 2})
+OK  id=job-7
+> db.Slots.dead()
+{"dead_id": "<HANDLE>", "deliveries": 5, "reason": "max_deliveries", "dead_at": "<TIMESTAMP>", "data": {"_id_": "job-7", "priority": 3, "value": {"_id_":"job-7","n":1}}}
+> db.Slots.requeue({all: true})
+requeued 0, left 1
+Error: requeue of "<HANDLE>" refused: the heap app.Slots already holds an element with id "job-7" at priority 3.
+  Discard the dead copy with db.Slots.discard({dead_id: "<HANDLE>"}), or remove the live one first.
+> db.Slots.requeue({dead_id: "{DEAD1}"})
+Error: requeue of "<HANDLE>" refused: the heap app.Slots already holds an element with id "job-7" at priority 3.
+  Discard the dead copy with db.Slots.discard({dead_id: "<HANDLE>"}), or remove the live one first.
+> db.Slots.discard({dead_id: "{DEAD1}"})
+discarded 1
+> db.Slots.dead()
+(no dead entries)
+> db.Work.requeue()
+Error: requeue names one dead entry or all of them, not both and not neither: db.Work.requeue({dead_id: "<dead_id>"}) or db.Work.requeue({all: true})
+> db.Work.requeue({dead_id: "ab", all: true})
+Error: requeue names one dead entry or all of them, not both and not neither: db.Work.requeue({dead_id: "<dead_id>"}) or db.Work.requeue({all: true})
+> db.Work.discard({all: false})
+Error: discard's all is true, as in db.Work.discard({all: true}); got false
+> db.Work.dead({limit: 0})
+Error: dead's limit is a whole number of 1 or more, as in db.Work.dead({limit: 3}); got 0
+> db.Work.dead({after: "zz"})
+Error: dead failed: server error (4): invalid dead option: dead_id "zz" is not a dead id. A dead_id is the value db.Work.dead() answered in dead_id; list what is there and copy it
+> db.Work.requeue({dead_id: "zz"})
+Error: requeue failed: server error (4): invalid dead option: dead_id "zz" is not a dead id. A dead_id is the value db.Work.dead() answered in dead_id; list what is there and copy it
+> db.Users.dead()
+Error: dead failed: server error (4): dead is not defined for hash buckets: only fifo, lifo and heap buckets have a dead list. Read with get("<key>") or find(), and remove with delete("<key>"). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.
+> db.Users.requeue({all: true})
+Error: requeue failed: server error (4): requeue is not defined for hash buckets: only fifo, lifo and heap buckets have a dead list. Read with get("<key>") or find(), and remove with delete("<key>"). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.
+> db.Post["p1"].Comments.dead()
+Error: dead is not available on a store field: db.Post["p1"].Comments is consumed with db.Post["p1"].Comments.pop(), which removes at most once. Claim, ack, release, extend and the dead verbs work on a fifo, lifo or heap bucket
+> db.Nope.dead()
+Error: dead failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

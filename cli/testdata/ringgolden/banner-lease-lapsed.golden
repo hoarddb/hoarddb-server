@@ -1,0 +1,13 @@
+┌─ hoardDB ────────────────────────────────────────────────────────────────┐
+│ node        node-c (active)               version 1.1.0-dev              │
+│ address     192.0.2.12:7533               uptime 2h3m10s                 │
+│ cluster     4 members, 3 voters           leader none                    │
+│ epoch       4                             RF default 2                   │
+│ process mem 1.1 GiB of 15.6 GiB (7.0%)                                   │
+│ cpus        4                             load 0.20 0.31 0.40            │
+│ server ram  5.9 GiB of 15.6 GiB                                          │
+│ session     admin — no database selected  2026-10-31 16:38:25            │
+│ warning     lease lapsed: reads and writes are refused until it renews   │
+└──────────────────────────────────────────────────────────────────────────┘
+Type 'help' to get started, 'exit' to quit.
+

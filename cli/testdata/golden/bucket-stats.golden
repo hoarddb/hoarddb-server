@@ -1,0 +1,32 @@
+> db.Users.stats()
+BUCKET app.Users
+---
+Type:               hash
+Entries:            2
+Logical size:       54 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            (none)
+> db.Post.stats()
+BUCKET app.Post
+---
+Type:               hash
+Entries:            1
+Logical size:       345 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            (none)
+> db.Emails.stats()
+BUCKET app.Emails
+---
+Type:               hash
+Entries:            1
+Logical size:       45 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            Email_1 (unique)
+> db.Nope.stats()
+Error: stats failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

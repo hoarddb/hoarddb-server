@@ -1,0 +1,211 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-13",
+ "kinds": [
+  {
+   "name": "issue",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "project",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "custom_value",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "journal",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "issue",
+   "filters": [
+    {
+     "field": "f0",
+     "optional": true
+    },
+    {
+     "field": "f1",
+     "optional": true
+    },
+    {
+     "field": "f2",
+     "optional": true
+    },
+    {
+     "field": "f3",
+     "optional": true
+    },
+    {
+     "field": "f4",
+     "optional": true
+    },
+    {
+     "field": "f5",
+     "optional": true
+    },
+    {
+     "field": "f6",
+     "optional": true
+    },
+    {
+     "field": "f7",
+     "optional": true
+    },
+    {
+     "field": "f8",
+     "optional": true
+    },
+    {
+     "field": "f9",
+     "optional": true
+    },
+    {
+     "field": "f10",
+     "optional": true
+    },
+    {
+     "field": "f11",
+     "optional": true
+    },
+    {
+     "field": "f12",
+     "optional": true
+    },
+    {
+     "field": "f13",
+     "optional": true
+    },
+    {
+     "field": "f14",
+     "optional": true
+    },
+    {
+     "field": "f15",
+     "optional": true
+    },
+    {
+     "field": "f16",
+     "optional": true
+    },
+    {
+     "field": "f17",
+     "optional": true
+    },
+    {
+     "field": "f18",
+     "optional": true
+    },
+    {
+     "field": "f19",
+     "optional": true
+    },
+    {
+     "field": "f20",
+     "optional": true
+    },
+    {
+     "field": "f21",
+     "optional": true
+    },
+    {
+     "field": "f22",
+     "optional": true
+    },
+    {
+     "field": "f23",
+     "optional": true
+    },
+    {
+     "field": "f24",
+     "optional": true
+    },
+    {
+     "field": "f25",
+     "optional": true
+    },
+    {
+     "field": "f26",
+     "optional": true
+    },
+    {
+     "field": "f27",
+     "optional": true
+    },
+    {
+     "field": "f28",
+     "optional": true
+    },
+    {
+     "field": "f29",
+     "optional": true
+    }
+   ],
+   "sort": [
+    "any:asc"
+   ],
+   "sort_from": "client",
+   "visibility": "container"
+  },
+  {
+   "op": "join",
+   "coll": "issue",
+   "join": {
+    "to": "project",
+    "on": "visible",
+    "kind": "visibility"
+   }
+  },
+  {
+   "op": "join",
+   "coll": "issue",
+   "join": {
+    "to": "project",
+    "on": "total",
+    "kind": "aggregate"
+   },
+   "dynamic": true
+  }
+ ]
+}

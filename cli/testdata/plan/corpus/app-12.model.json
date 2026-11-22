@@ -1,0 +1,129 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-12",
+ "kinds": [
+  {
+   "name": "property",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "company_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "company",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "company",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "payment",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ],
+   "expire_whole": true
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "property",
+   "by": [
+    "company_id"
+   ],
+   "filters": [
+    {
+     "field": "f0",
+     "optional": true
+    },
+    {
+     "field": "f1",
+     "optional": true
+    },
+    {
+     "field": "f2",
+     "optional": true
+    },
+    {
+     "field": "f3",
+     "optional": true
+    },
+    {
+     "field": "f4",
+     "optional": true
+    },
+    {
+     "field": "f5",
+     "optional": true
+    },
+    {
+     "field": "f6",
+     "optional": true
+    },
+    {
+     "field": "f7",
+     "optional": true
+    },
+    {
+     "field": "f8",
+     "optional": true
+    },
+    {
+     "field": "f9",
+     "optional": true
+    }
+   ],
+   "sort": [
+    "created:desc"
+   ],
+   "sort_from": "fixed"
+  },
+  {
+   "op": "list",
+   "coll": "property",
+   "by": [
+    "manager_id"
+   ],
+   "visibility": "membership"
+  },
+  {
+   "op": "join",
+   "coll": "payment",
+   "join": {
+    "to": "property",
+    "on": "id",
+    "kind": "aggregate"
+   },
+   "surface": "admin"
+  }
+ ]
+}

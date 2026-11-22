@@ -1,0 +1,10 @@
+> alter user bob roles [writer@app]
+user "bob" altered (config version 3)
+> alter user bob disable
+user "bob" altered (config version 4)
+> alter user bob enable
+user "bob" altered (config version 5)
+> alter user bob password
+user "bob" altered (config version 6)
+> alter user nobody disable
+Error: user "nobody" not found; run 'user list' to see the users

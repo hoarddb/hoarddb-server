@@ -1,0 +1,16 @@
+> db.Users.get("u1")
+{"_id_": "u1", "n": 1}
+> db.Users.get("zz")
+NOT FOUND
+> db.Events.get("e5")
+{"_id_": "e5", "kind": "click"}
+> db.Events.get("zz")
+NOT FOUND
+> db.Jobs.get("k")
+Error: db.Jobs.get() is not defined for fifo buckets — they are read by position:
+       db.Jobs.peek()  shows the next entry without removing it
+       db.Jobs.pop()   removes and returns the next entry
+> db.Tasks.get("k")
+Error: db.Tasks.get() is not defined for heap buckets — use db.Tasks.peek() for the highest-priority entry, or db.Tasks.pop() to remove it
+> db.Nope.get("k")
+Error: inspecting bucket "Nope": server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

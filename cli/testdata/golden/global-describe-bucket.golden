@@ -1,0 +1,37 @@
+> describe bucket Users
+BUCKET app.Users
+---
+Type:               hash
+Entries:            2
+Logical size:       54 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            (none — declare them when you create the bucket)
+> describe bucket Post
+BUCKET app.Post
+---
+Type:               hash
+Entries:            1
+Logical size:       345 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            (none — declare them when you create the bucket)
+Stores:             (elements summed over every document)
+  Comments     fifoStore  1 element(s)
+  Tags         hashStore  1 element(s)
+> describe bucket Emails
+BUCKET app.Emails
+---
+Type:               hash
+Entries:            1
+Logical size:       45 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            Email_1 (unique)
+> describe bucket Nope
+Error: describing bucket "Nope": server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it
+> describe bucket
+Error: parse: usage: describe bucket <name> [in <database>]

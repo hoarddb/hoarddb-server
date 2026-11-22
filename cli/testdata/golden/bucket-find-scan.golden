@@ -1,0 +1,13 @@
+> db.Users.find()
+{"_id_": "u1", "n": 1}
+{"_id_": "u2", "n": 9}
+> db.Users.find({"n": {"$gt": 5}}, {limit: 2})
+{"_id_": "u2", "n": 9}
+> db.Users.find({}, {skip: 1, limit: 1})
+{"_id_": "u2", "n": 9}
+> db.Users.find({"zzz": 1})
+NO MATCHES
+> db.Users.find({"n": {"$bogus": 1}})
+Error: find failed: server error (5): unsupported filter operator "$bogus": this version supports $gt, $gte, $lt, $lte, $in, $nin, $ne, $exists and $regex on a field
+> db.Nope.find()
+Error: bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

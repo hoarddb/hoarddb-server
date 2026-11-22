@@ -1,0 +1,24 @@
+[h]oardDB [app]> set extjson on
+extjson is now on for documents printed from now on.
+[h]oardDB [app]> db.User["ada"].get()
+{"Age": 36, "Joined": {"$date":"2024-08-24T04:57:21.295Z"}, "Name": "Ada", "_id_": "ada"}
+[h]oardDB [app]> set pretty on
+pretty is now on for documents printed from now on.
+[h]oardDB [app]> db.User.list()
+{
+  "Age": 36,
+  "Joined": {
+    "$date": "2024-08-24T04:57:21.295Z"
+  },
+  "Name": "Ada",
+  "_id_": "ada"
+}
+[h]oardDB [app]> set extjson off
+extjson is now off for documents printed from now on.
+[h]oardDB [app]> db.User["ada"].get()
+{
+  "Age": 36,
+  "Joined": "2024-08-24T04:57:21.295Z",
+  "Name": "Ada",
+  "_id_": "ada"
+}

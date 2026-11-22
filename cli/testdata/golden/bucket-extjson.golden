@@ -1,0 +1,21 @@
+> db.Users.find("d1")
+{"_id_": "d1", "at": {"$date":"2026-02-01T00:00:00Z"}}
+> db.Users.get("d1")
+{"_id_": "d1", "at": {"$date":"2026-02-01T00:00:00Z"}}
+> db.Users.find({"_id_": "d1"})
+{"_id_": "d1", "at": {"$date":"2026-02-01T00:00:00Z"}}
+> db.Users.search({"_id_": "d1"})
+Found 1 results (full scan):
+{"_id_": "d1", "at": {"$date":"2026-02-01T00:00:00Z"}}
+> db.Users.find()
+{"_id_": "d1", "at": {"$date":"2026-02-01T00:00:00Z"}}
+{"_id_": "u1", "n": 1}
+{"_id_": "u2", "n": 9}
+> db.Users.update("d1", {$set: {"n": 2}})
+OK  updated "d1"
+{"_id_": "d1", "at": {"$date":"2026-02-01T00:00:00Z"}, "n": 2}
+> db.Post["p1"].Tags.get("t9")
+{"_id_": "<ID>", "at": {"$date":"2026-02-01T00:00:00Z"}}
+> db.Post["p1"].Tags.list()
+t1  {"_id_": "<ID>", "n": 1}
+t9  {"_id_": "<ID>", "at": {"$date":"2026-02-01T00:00:00Z"}}

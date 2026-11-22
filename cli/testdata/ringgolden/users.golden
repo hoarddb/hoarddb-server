@@ -1,0 +1,36 @@
+[h]oardDB> show users
+USERS (revision 1)
+---
+root: enabled, roles [root@*], epoch 0
+[h]oardDB> create user alice roles [reader@app]
+user "alice" created (revision 2)
+[h]oardDB> grant role writer@app to alice
+granted writer@app to "alice" (revision 3)
+[h]oardDB> show users
+USERS (revision 3)
+---
+alice: enabled, roles [reader@app, writer@app], epoch 1
+root: enabled, roles [root@*], epoch 0
+[h]oardDB> revoke role reader@app from alice
+revoked reader@app from "alice" (revision 4)
+[h]oardDB> alter user alice disable
+user "alice" altered (revision 5)
+[h]oardDB> alter user alice enable
+user "alice" altered (revision 6)
+[h]oardDB> alter user alice roles [db-manager@app, reader@*]
+user "alice" altered (revision 7)
+[h]oardDB> user list
+USERS (revision 7)
+---
+alice: enabled, roles [db-manager@app, reader@*], epoch 3
+root: enabled, roles [root@*], epoch 0
+[h]oardDB> drop user alice
+user "alice" dropped
+[h]oardDB> drop user alice
+Error: NOT_FOUND: drop user "alice" was not applied: there is no user "alice". Run 'show users' to list the users.
+[h]oardDB> grant role writer@app to alice
+Error: NOT_FOUND: grant role writer@app to "alice": user not found; run 'user list' to see the users
+[h]oardDB> create user alice roles reader@app
+Error: PARSE_ERROR: cannot read the statement at character 25: found "reader", expected "[". The form is 'create user <name> [roles [<role>@<db>, …]]'. For example 'create user ada roles [reader@app]'. Run 'help create' for every form
+[h]oardDB> user describe alice
+Error: NOT_FOUND: there is no user "alice". Run 'show users' to list the users.

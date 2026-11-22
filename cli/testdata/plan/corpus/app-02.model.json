@@ -1,0 +1,55 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-02",
+ "kinds": [
+  {
+   "name": "object",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "permission",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "object",
+   "by": [
+    "parent"
+   ],
+   "sort": [
+    "version:desc"
+   ],
+   "sort_from": "fixed"
+  },
+  {
+   "op": "join",
+   "coll": "object",
+   "join": {
+    "to": "permission",
+    "on": "object",
+    "kind": "visibility"
+   }
+  }
+ ]
+}

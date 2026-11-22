@@ -1,0 +1,169 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-08",
+ "kinds": [
+  {
+   "name": "post",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "channel_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "channel",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "channel",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "total_msg_count",
+     "type": "int",
+     "present_permille": 1000,
+     "role": "counter"
+    }
+   ]
+  },
+  {
+   "name": "channel_member",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "channel_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "channel",
+      "resolve_permille": 1000
+     }
+    },
+    {
+     "name": "user_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "user",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "user",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "category",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "channel_member",
+   "by": [
+    "channel_id"
+   ]
+  },
+  {
+   "op": "list",
+   "coll": "channel_member",
+   "by": [
+    "user_id"
+   ]
+  },
+  {
+   "op": "list",
+   "coll": "post",
+   "by": [
+    "channel_id"
+   ],
+   "sort": [
+    "created:desc"
+   ],
+   "sort_from": "client"
+  },
+  {
+   "op": "join",
+   "coll": "channel_member",
+   "join": {
+    "to": "permission",
+    "on": "channel",
+    "kind": "visibility"
+   }
+  },
+  {
+   "op": "search",
+   "coll": "post",
+   "visibility": "membership"
+  },
+  {
+   "op": "insert",
+   "coll": "post",
+   "atomic_with": "post-counter"
+  },
+  {
+   "op": "update",
+   "coll": "channel",
+   "atomic_with": "post-counter",
+   "inc": [
+    "total_msg_count"
+   ]
+  },
+  {
+   "op": "insert",
+   "coll": "channel_member",
+   "atomic_with": "member-category"
+  },
+  {
+   "op": "insert",
+   "coll": "category",
+   "atomic_with": "member-category"
+  }
+ ]
+}

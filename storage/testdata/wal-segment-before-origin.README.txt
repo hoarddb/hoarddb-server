@@ -1,0 +1,19 @@
+wal-segment-before-origin.bin is a write-ahead log segment written by the tree
+BEFORE the origin block existed (hoardDB main at 42dea827f478c5893ca2d4ab04d99f7d9ac7605b),
+not by this build. It is the file `wal_00001.log` of a node that applied a
+FIFO bucket as a REPLICA: database create, bucket create, five pushes -- 7
+entries, 1048 bytes, sha256
+220bed8ccde475d49365183c8a06c68800d537c21b69ac7d7781606ab1b84bb4.
+
+How it was produced: wal-segment-before-origin.generator.txt is the throwaway
+test (renamed .txt so it is not compiled). It was dropped into hoardDB/server/
+on the base commit with no other edit, run with
+  FIXTURE_OUT=$PWD/storage/testdata go test -count=1 -run TestZZGenerateLegacyFixture ./server/
+and deleted. It starts a three-node factor-3 cluster with the base code, pushes
+five documents at write concern "all", takes the WAL of a node that does not own
+the bucket, and copies its segment. wal-segment-before-origin.json is what the
+base tree's own reader (WAL.ReadFrom) returned for that segment.
+
+Do not regenerate it from a newer tree: its whole value is that this build did
+not write it. It is used by the storage reader test and by the server test that
+pins what a new owner does with entries it applied before the upgrade.

@@ -1,0 +1,14 @@
+# Built binaries
+/hoarddb-server
+/hoarddb
+/dist/
+*.test
+*.out
+
+# Local state: the default data directory holds keys and credentials.
+/data/
+
+# Pinned tool cache from make lint (scripts/lint-tool.sh).
+/.ci-tools/
+
+.DS_Store

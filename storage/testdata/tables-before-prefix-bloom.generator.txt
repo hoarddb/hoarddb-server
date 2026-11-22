@@ -1,0 +1,116 @@
+Generator of storage/testdata/tables-before-prefix-bloom/: a Badger directory's MANIFEST and
+two Level-0 tables written by the build at c33271137 (next, 2026-11-15), the last tree whose
+table builder knows no prefix rules. The tables therefore carry no bloom_prefix_rules field in
+their index and no prefix hash in their filter.
+TestTablesOfAnEarlierBuildAreNeverSkipped (prefix_bloom_earlier_build_test.go) reads them.
+
+The throwaway test below was dropped into storage/ of that tree as
+zz_prefix_bloom_fixture_generator_test.go and run once on a test VM, from hoardDB/:
+
+    go test ./storage -run TestZZGenerateTablesBeforePrefixBloom -count=1 -v
+
+It printed the directory's files (000001.sst 326 bytes, 000002.sst 239, MANIFEST 44, two
+20-byte value logs, DISCARD, KEYREGISTRY, memtable-size) and MANIFEST plus the two tables as a
+base64 tar, which was unpacked here. The other files are not checked in: Badger writes them
+anew on open, and no value is large enough to sit in a value log.
+
+000001.sst: the header of document "m" and its field 2 ("old"), the headers of documents "a"
+            and "z", element 0 of the store field 4 of "m" ("first"), and element 0 of the
+            same field of "a" and of "z".
+000002.sst: field 2 of "m" ("new") without the header, and element 1 of the store ("second").
+
+sha256:
+be6ad3bf6e0616da80b4145669092429e21a9eb8acdaa8894428f8ceb1e29a1b   000001.sst
+90c14c0677e1b79e5be3ef3ddad58db3a6c991a04c7ff18368e83fe2ed87d071   000002.sst
+17240d8b340dd7c0891598780730a109fde4176c826bdbdd96aa6747725e1730   MANIFEST
+
+----8<---- the throwaway test ----8<----
+
+package storage_test
+
+import (
+	"archive/tar"
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"hoardDB/storage"
+)
+
+// Throwaway: generates storage/testdata/tables-before-prefix-bloom/ from the tree at
+// c33271137, the last one whose table builder knows no prefix rules. It opens a store as the
+// node does, writes two batches with a close and reopen after each (one Level-0 table per
+// batch), and prints MANIFEST and the two tables as a base64 tar between two marker lines.
+//
+//	go test ./storage -run TestZZGenerateTablesBeforePrefixBloom -count=1 -v
+func TestZZGenerateTablesBeforePrefixBloom(t *testing.T) {
+	dir := t.TempDir()
+	id := func(letter byte) []byte { return []byte{storage.TagString, letter, 0x00, 0x00} }
+	document := func(letter byte) []byte { return storage.Key(3, 7, 9, storage.NSDocuments, id(letter)) }
+	element := func(letter byte, position uint64) []byte {
+		return binary.BigEndian.AppendUint64(storage.Key(3, 7, 9, storage.NSFieldStore, id(letter), []byte{0x00, 0x04, storage.NSQueue}), position)
+	}
+	field := binary.BigEndian.AppendUint16(bytes.Clone(document('m')), 2)
+	type pair struct{ key, value []byte }
+	for _, table := range [][]pair{
+		{
+			{document('m'), []byte("header")}, {field, []byte("old")},
+			{document('a'), []byte("low")}, {document('z'), []byte("high")},
+			{element('m', 0), []byte("first")},
+			{element('a', 0), []byte("low")}, {element('z', 0), []byte("high")},
+		},
+		{{field, []byte("new")}, {element('m', 1), []byte("second")}},
+	} {
+		kv, err := storage.OpenBadgerKV(dir, storage.BadgerTuning{MemTableMB: 32}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch := kv.NewBatch()
+		for _, p := range table {
+			if err := batch.Set(p.key, p.value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := batch.Commit(true); err != nil {
+			t.Fatal(err)
+		}
+		if err := kv.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	w := tar.NewWriter(&archive)
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Printf("FILE %s %d\n", entry.Name(), info.Size())
+		if entry.Name() != "MANIFEST" && !strings.HasSuffix(entry.Name(), ".sst") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteHeader(&tar.Header{Name: entry.Name(), Mode: 0o644, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("FIXTURE-BEGIN\n%s\nFIXTURE-END\n", base64.StdEncoding.EncodeToString(archive.Bytes()))
+}

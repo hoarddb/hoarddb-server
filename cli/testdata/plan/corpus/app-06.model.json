@@ -1,0 +1,89 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-06",
+ "kinds": [
+  {
+   "name": "game",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "us",
+     "type": "array",
+     "present_permille": 1000,
+     "ref": {
+      "to": "user",
+      "resolve_permille": 1000
+     },
+     "array": {
+      "len_p50": 3,
+      "len_p95": 9,
+      "len_max": 20,
+      "elem_is_document": false
+     }
+    }
+   ]
+  },
+  {
+   "name": "user",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "activity",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ],
+   "expire_whole": true
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "game",
+   "by": [
+    "us"
+   ],
+   "sort": [
+    "createdAt:desc"
+   ],
+   "sort_from": "fixed"
+  },
+  {
+   "op": "search",
+   "coll": "game"
+  },
+  {
+   "op": "join",
+   "coll": "game",
+   "join": {
+    "to": "user",
+    "on": "insight",
+    "kind": "aggregate"
+   },
+   "surface": "admin"
+  }
+ ]
+}

@@ -1,0 +1,90 @@
+[h]oardDB> status seeding
+SEEDING
+---
+Nothing is being copied to this node: no slot is placing, seeding, stalled or retired.
+[h]oardDB> status seeding app
+SEEDING
+---
+No seeding row for database "app". Run 'status seeding' to list every row.
+[h]oardDB> status seeding app 5
+SEEDING
+---
+No seeding row for slot 5 of database "app". Run 'status seeding' to list every row.
+[h]oardDB> status seeding nobody
+SEEDING
+---
+No seeding row for database "nobody". Run 'status seeding' to list every row.
+[h]oardDB> seeding retry app 5
+Error: SEED_NOT_HELD: slot 5 of database "app" is absent on this node, and only a seeding or stalled slot can be restarted, so nothing was changed. Run 'status seeding app 5' to see it, or 'nodes' to see which node owns the slot
+[h]oardDB> seeding retry app 0x0a4e
+Error: SEED_NOT_HELD: slot 2638 of database "app" is absent on this node, and only a seeding or stalled slot can be restarted, so nothing was changed. Run 'status seeding app 2638' to see it, or 'nodes' to see which node owns the slot
+[h]oardDB> seeding forget app 5
+Error: SEED_NOT_HELD: slot 5 of database "app" has no record on this node, so there is nothing to forget and nothing was changed. Run 'status seeding' to list the slots this node keeps a record of, or 'nodes' to see which node owns the slot
+[h]oardDB> seeding retry app
+Error: PARSE_ERROR: cannot read the statement at character 18: found the end of the statement, expected a slot number. The form is 'seeding retry <db> <slot>'. For example 'seeding retry app 5'. Run 'help seeding' for every form
+[h]oardDB> seeding retry app 9000
+Error: PARSE_ERROR: slot 9000 is past the last slot, 8191. Run 'status seeding' to list the slots of this node (character 19). The form is 'seeding retry <db> <slot>'. For example 'seeding retry app 5'. Run 'help seeding' for every form
+[h]oardDB> seeding forget
+Error: PARSE_ERROR: cannot read the statement at character 15: found the end of the statement, expected a database name. The form is 'seeding forget <db> <slot> [anyway]'. For example 'seeding forget app 5'. Run 'help seeding' for every form
+[h]oardDB> status seeding app 5 6
+Error: PARSE_ERROR: cannot read the statement at character 22: found "6", expected the end of the statement. The form is 'status seeding [<db> [<slot>]]'. For example 'status seeding'. Run 'help status' for every form
+[h]oardDB> help seeding
+seeding — restart or forget a slot's pull
+=========================================
+
+Start a slot's pull again:
+  seeding retry <db> <slot>
+
+  seeding retry app 5
+  seeding retry app 0x0a4e
+
+  Start the pull of one slot again from a fresh cut, on another legal source
+  if there is one. Use it on a row 'status seeding' shows as stalled. The
+  statement returns at once; 'status seeding' shows the new attempt. It is
+  refused, changing nothing, for a slot this node has no seeding record for.
+  Needs the cluster-manager role.
+
+Forget a retired slot:
+  seeding forget <db> <slot> [anyway]
+
+  seeding forget app 5
+  seeding forget app 5 anyway
+
+  Remove the record of a retired slot whose deletion gate waits for a copy
+  that will never come. Its data stays on disk until another copy accepts
+  this node's next pull of the slot or this node leaves the slot's copy set
+  again; either deletes it. Refused, changing nothing, for a slot that is
+  not retired (SEED_HELD), with no record (SEED_NOT_HELD), or retired with
+  no other member holding a copy (SEED_HELD): this node may hold the only
+  copy, so add anyway to forget it. Needs the cluster-manager role.
+
+Next: status seeding <db> <slot>, to watch it
+[h]oardDB> help status
+status — slot pulls in progress
+===============================
+
+List the slots this node is copying:
+  status seeding [<db> [<slot>]]
+
+  status seeding
+  status seeding app
+  status seeding app 5
+
+  List every slot this node is copying or keeping: placing (queued),
+  seeding, stalled (no chunk applied for a while) and retired (the slot left
+  this node's copy set and its range waits for its deletion gate), with the
+  node it reads from, how much is copied, how many entries and how long ago
+  the last chunk arrived. A stalled or refused row says why and names the
+  statement that fixes it. Slots that are ready and serving are not listed.
+  Add a database, and a slot, to narrow it; the slot is decimal or 0x hex.
+  It lists up to 2000 rows. Needs the cluster-manager role.
+
+Epoch, leader and lease:
+  status
+
+  status
+
+  Show this node's view: its epoch, the leader it knows, whether it is
+  serving, and the voters.
+
+Next: seeding retry <db> <slot>, for a stalled row

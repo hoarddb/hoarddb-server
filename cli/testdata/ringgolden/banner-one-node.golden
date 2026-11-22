@@ -1,0 +1,12 @@
+┌─ hoardDB ────────────────────────────────────────────────────────────────┐
+│ node        node-a                        version 1.1.0-dev              │
+│ address     192.0.2.10:7533               uptime 5m12s                   │
+│ cluster     single node                   RF default 1                   │
+│ process mem 61.2 MiB of 28.7 GiB (0.2%)                                  │
+│ cpus        16                            load 0.42 0.51 0.60            │
+│ server ram  7.5 GiB of 28.7 GiB                                          │
+│ session     admin — no database selected  2026-10-31 16:38:25            │
+└──────────────────────────────────────────────────────────────────────────┘
+No databases yet. Start with: create database app
+Type 'help' to get started, 'exit' to quit.
+

@@ -1,0 +1,15 @@
+> db.Post["p1"].Comments.pop({limit: 2})
+{"_id_": "<ID>", "by": "ada"}
+{"_id_": "<ID>", "by": "bob"}
+> db.Post["p1"].Comments.len()
+2
+> db.Post["p1"].Comments.pop({limit: 5})
+{"_id_": "<ID>", "by": "cy"}
+{"_id_": "<ID>", "by": "di"}
+> db.Post["p1"].Comments.pop({limit: 2})
+EMPTY
+> db.Post["p1"].Comments.pop(3)
+Error: pop(3) is not supported: the count goes in an option document.
+       Use db.Post["p1"].Comments.pop({limit: 3}) to remove and return the next 3.
+> db.Post["p1"].Comments.pop({lmit: 1})
+Error: pop has one option, limit, and "lmit" is not it: db.Post["p1"].Comments.pop({limit: 3}) removes and returns the next 3

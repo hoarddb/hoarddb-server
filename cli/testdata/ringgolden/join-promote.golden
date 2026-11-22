@@ -1,0 +1,13 @@
+[h]oardDB> join node-b@<ADDR>
+Added node-b@<ADDR> as a member: joining, then active when it holds the slots it will own (epoch 2)
+[h]oardDB> join node-w@<ADDR>
+Added node-w@<ADDR> as a witness: it votes and holds no documents (epoch 2)
+[h]oardDB> join node-c@<ADDR>
+Added node-c@<ADDR> as a member: joining (not a voter: the cluster already has its 3 voters) (epoch 3)
+[h]oardDB> nodes
+NODE    STATE   ADDRESS                    ROLE
+node-a  active  <ADDR> (cluster)  member
+node-b  active  <ADDR> (cluster)  member
+node-c  active  <ADDR> (cluster)  member
+Voters: 3 of 3 members
+epoch 3, state_seq 10

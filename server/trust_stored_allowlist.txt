@@ -1,0 +1,33 @@
+# The functions that may call bson.TrustStored, read by
+# TestTrustStoredIsCalledOnlyFromStorageReads (trust_stored_allowlist_test.go).
+#
+# TrustStored checks only a document's framing. It is for bytes this node read
+# back from its own store; bytes from a client, a peer, a restore file, a
+# migration stream or a WAL record go through bson.Validate at the site's
+# limit (server/nesting_depth.go:validateAt). Adding a line here is a reviewed
+# change: name the storage read, and why its bytes are this node's own.
+#
+# One entry per line: the file relative to the hoardDB module root, a colon,
+# and the enclosing function, a method written (*Type).Method.
+
+# Step 7a: the query paths read the bytes the bucket's own walk or snapshot
+# hands out, and match them in place instead of decoding them to a map.
+server/scan.go:scanFilteredPage
+server/scan_sorted.go:scanSortedPage
+server/search_plan.go:residualMatches
+server/manage.go:countFilteredEntries
+server/manage.go:distinctValues
+server/manage.go:(*Server).updateMultiple
+
+# Step 7a, store group: the hash store reads back a stored document's previous
+# version to unindex it, reindex it or check its expiry, and reads only the
+# fields its indexes (or the expiry) name.
+store/hash.go:(*HashStore).indexDocument
+store/hash.go:(*HashStore).removeStored
+store/hash.go:(*HashStore).deleteCascading
+# A conflicted unique index renders its value from the first holder's
+# stored document.
+store/unique.go:(*IndexManager).conflictedIndexError
+# An index rebuild walks the bucket's stored documents and reads the fields
+# its targets name.
+server/index_rebuild.go:(*Server).writeRebuiltEntries

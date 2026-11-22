@@ -1,0 +1,18 @@
+> db.Users.update("u1", {$set: {"n": 2}})
+OK  updated "u1"
+{"_id_": "u1", "n": 2}
+> db.Users.update("u1", {$inc: {"n": 5}})
+OK  updated "u1"
+{"_id_": "u1", "n": 7}
+> db.Users.update("u1", {$unset: ["n"]})
+OK  updated "u1"
+{"_id_": "u1"}
+> db.Users.update("zz", {$set: {"n": 2}})
+Error: document "zz" not found in app.Users — insert it first or use find to check the key
+> db.Users.update("u1")
+Error: usage: db.Users.update("<key>", {$set: {field: value}})
+       supported operators: $set {field: value}, $unset ["field"], $inc {field: N},
+       $push {field: value}, $addToSet {field: value}, $mul {field: N},
+       $min {field: value}, $max {field: value}, $rename {oldName: "newName"}
+> db.Users.find("u1")
+{"_id_": "u1"}

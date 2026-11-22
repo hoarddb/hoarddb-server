@@ -1,0 +1,3492 @@
+diff --git a/backup.go b/backup.go
+index df46649..d5f70c7 100644
+--- a/backup.go
++++ b/backup.go
+@@ -1,6 +1,10 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-11-17: DB.Load is refused in a store
++ * opened with a vouched cut (WithVouchedCut). See
++ * hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -231,6 +235,9 @@ func (l *KVLoader) Finish() error {
+ // DB.Load() should be called on a database that is not running any other
+ // concurrent transactions while it is running.
+ func (db *DB) Load(r io.Reader, maxPendingWrites int) error {
++	if err := db.refuseUnderVouchedCut("DB.Load"); err != nil {
++		return err
++	}
+ 	br := bufio.NewReaderSize(r, 16<<10)
+ 	unmarshalBuf := make([]byte, 1<<10)
+ 
+diff --git a/db.go b/db.go
+index 4f20d8d..98229bd 100644
+--- a/db.go
++++ b/db.go
+@@ -36,6 +36,25 @@
+  * Modified by the hoardDB project, 2026-11-15: the DB carries the prefix bloom
+  * counters, and Open refuses a BloomPrefixRules list whose ids a table's index
+  * could not keep apart. See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-11-17: the vouched cut. Open refuses
++ * WithVouchedCut with ReadOnly, InMemory or managed mode, cuts the memtable
++ * logs above the vouched version and starts commit versions above it;
++ * DB.writeRequests records the highest version written to a memtable, which
++ * DB.SyncVouched reads before its capture (DB.Sync calls it); the calls that
++ * write out of version order are refused under the cut. See
++ * hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-11-18: a flush on disk names its
++ * table, removes the memtable's log durably and only then inserts the table
++ * into level 0 (DB.flushToNamedTable); Open removes a log whose table the
++ * MANIFEST already names before compactions start; Close closes, and keeps,
++ * a named table no level holds; DB.flushMemtable calls the flush test hook.
++ * See hoardDB/third_party/README.md.
++ * Modified by the hoardDB project, 2026-11-19: a flush whose MANIFEST change
++ * fails keeps its table file and is not retried (memTable.failedNaming,
++ * ErrFlushNotNamed, logged once, hoardDB's BUG-0868). See
++ * hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -194,6 +213,25 @@ type DB struct {
+ 	// (BloomPrefixStats). It belongs to the DB so two DBs in one process never
+ 	// share a count. hoardDB.
+ 	bloomPrefix table.BloomPrefixCounters
++
++	// writtenVersion is the highest commit version fully written to a
++	// memtable: DB.writeRequests raises it right after DB.writeToLSM returned
++	// for a request and before any waiter of the group is released, and Open
++	// starts it at the version nextTxnTs starts from. One goroutine writes in
++	// version order, so every version at or below it is in a memtable, and a
++	// caller whose commit has returned finds it at or below it.
++	// DB.SyncVouched reads it before its capture. hoardDB.
++	writtenVersion atomic.Uint64
++	// replayCut is the vouched cut's state while openMemTables replays the
++	// logs, nil at every other time and without WithVouchedCut. hoardDB.
++	replayCut *vouchedCutScan
++	// vouchedReport is what the cut did, set during Open (DB.VouchedCutReport).
++	vouchedReport VouchedCutReport
++	// logFilesCreated moves each time a memtable log or a value-log file is
++	// created, before any commit is written to it; Open starts it at 1, so the
++	// files Open found or created count as not yet covered by a directory
++	// fsync of the caller's (DB.LogFilesCreated). hoardDB.
++	logFilesCreated atomic.Uint64
+ }
+ 
+ const (
+@@ -219,6 +257,9 @@ func checkAndSetOptions(opt *Options) error {
+ 	if err := checkBloomPrefixRules(opt.BloomPrefixRules); err != nil {
+ 		return err
+ 	}
++	if err := checkVouchedCutOptions(opt); err != nil {
++		return err
++	}
+ 	opt.maxBatchSize = (15 * opt.MemTableSize) / 100
+ 	opt.maxBatchCount = opt.maxBatchSize / int64(skl.MaxNodeSize)
+ 
+@@ -409,6 +450,7 @@ func Open(opt Options) (*DB, error) {
+ 	db.closers.updateSize = z.NewCloser(1)
+ 	go db.updateSize(db.closers.updateSize)
+ 
++	db.logFilesCreated.Store(1) // hoardDB: see DB.LogFilesCreated.
+ 	if err := db.openMemTables(db.opt); err != nil {
+ 		return nil, y.Wrapf(err, "while opening memtables")
+ 	}
+@@ -428,6 +470,15 @@ func Open(opt Options) (*DB, error) {
+ 	db.vlog.init(db)
+ 
+ 	if !opt.ReadOnly {
++		// hoardDB: before any compaction or flush, a replayed log whose table
++		// the MANIFEST already names goes, durably (flushed_log.go). A step
++		// added here; nothing in Open moves.
++		// Assigned to Open's err, not shadowed, so the deferred cleanup runs
++		// (review F7).
++		if err = db.removeLogsOfNamedTables(); err != nil {
++			return nil, err
++		}
++		openCompactionsHook(db.opt.Dir)
+ 		db.closers.compactors = z.NewCloser(1)
+ 		db.lc.startCompact(db.closers.compactors)
+ 
+@@ -442,6 +493,16 @@ func Open(opt Options) (*DB, error) {
+ 	}
+ 	// We do increment nextTxnTs below. So, no need to do it here.
+ 	db.orc.nextTxnTs = db.MaxVersion()
++	// hoardDB: under a vouched cut the first commit takes a version above the
++	// vouched one, which can be above every version the store holds (a replay
++	// of deletes compacted below it), so no commit ever takes a version that
++	// a sync already vouched (I-3).
++	if db.opt.vouchedCut {
++		db.orc.nextTxnTs = max(db.orc.nextTxnTs, db.opt.vouchedVersion)
++		db.vouchedReport.Vouched = db.opt.vouchedVersion
++		db.vouchedReport.Kept = db.orc.nextTxnTs
++	}
++	db.writtenVersion.Store(db.orc.nextTxnTs)
+ 	db.opt.Infof("Set nextTxnTs to %d", db.orc.nextTxnTs)
+ 
+ 	if err = db.vlog.open(db); err != nil {
+@@ -623,6 +684,10 @@ func (db *DB) close() (err error) {
+ 	// stopMemoryFlush has waited for that goroutine.
+ 	var leftCurrent int
+ 	var leftCause error
++	// namedLeft (hoardDB, review F6) counts the unflushed memtables whose
++	// tables the MANIFEST already names: their logs are removed and their
++	// writes are in those tables, so they are not "replayed at the next open".
++	var namedLeft int
+ 	defer func() {
+ 		if stalledErr := db.lc.stalledByUnreadableTable(); stalledErr != nil {
+ 			err = errors.Join(stalledErr, err)
+@@ -631,8 +696,13 @@ func (db *DB) close() (err error) {
+ 			if db.unflushedCause != nil {
+ 				leftCause = db.unflushedCause
+ 			}
+-			err = errors.Join(fmt.Errorf("DB.Close: %d memtables not flushed, their logs stay in %s "+
+-				"and are replayed at the next open: %w", unflushed, db.opt.Dir, leftCause), err)
++			text := fmt.Sprintf("DB.Close: %d memtables not flushed, their logs stay in %s and are replayed at the "+
++				"next open", max(unflushed-namedLeft, 0), db.opt.Dir)
++			if namedLeft > 0 {
++				text += fmt.Sprintf("; %d more had their tables named in the MANIFEST, which hold their writes and are "+
++					"loaded at the next open, and their logs were removed", namedLeft)
++			}
++			err = errors.Join(fmt.Errorf("%s: %w", text, leftCause), err)
+ 		}
+ 	}()
+ 
+@@ -724,6 +794,13 @@ func (db *DB) close() (err error) {
+ 	}
+ 	db.stopMemoryFlush()
+ 	db.stopCompactions()
++	// hoardDB: a table the MANIFEST names whose log's removal never became
++	// durable is in no level; it is closed here and kept on disk.
++	released, namedErr := db.releaseNamedTables()
++	namedLeft = released
++	if namedErr != nil {
++		err = errors.Join(err, fmt.Errorf("DB.Close: %w", namedErr))
++	}
+ 
+ 	// Force Compact L0
+ 	// We don't need to care about cstatus since no parallel compaction is running.
+@@ -816,12 +893,40 @@ var syncActiveWALHook func(*memTable)
+ // a test can try to rotate the memtable between the two captures.
+ var syncCaptureHook func()
+ 
++// LogFilesCreated returns a count that moves each time a memtable log or a
++// value-log file is created, and that Open starts at 1. A file is counted
++// before any commit is written to it, and DB.SyncVouched's version is
++// published after the commit is written, so a count read after that version
++// counts every file holding a commit at or below it. hoardDB: the caller
++// fsyncs the directory, making those files' entries durable, only when the
++// count moved since its last directory fsync (store-vouched-cut slice S-3).
++func (db *DB) LogFilesCreated() uint64 {
++	return db.logFilesCreated.Load()
++}
++
+ // Sync syncs database content to disk. This function provides
+ // more control to user to sync data whenever required.
+ func (db *DB) Sync() error {
++	_, err := db.SyncVouched()
++	return err
++}
++
++// SyncVouched syncs database content to disk as Sync does and returns the
++// highest commit version it made durable: every commit at or below it, and
++// every commit that had returned before the call, is on disk when it returns
++// nil. On an error it returns 0. hoardDB: the caller records the version
++// (hoardDB's sync marker) and passes it to WithVouchedCut at the next open.
++//
++// The version is read before the capture of the memtables, never after it: a
++// commit that returns after the capture can land in a memtable rotated in
++// after it, whose log this call never syncs, so a version read later could
++// vouch a commit that is not durable. Reading it first is the whole contract
++// (store-vouched-cut-spec.md §3.3, trap 1 of its build document).
++func (db *DB) SyncVouched() (uint64, error) {
++	vouched := db.writtenVersion.Load()
+ 	if db.opt.InMemory || db.opt.ReadOnly {
+ 		// InMemory and read-only modes do not use WAL/vlog files, so Sync is a no-op.
+-		return nil
++		return vouched, nil
+ 	}
+ 
+ 	/**
+@@ -889,7 +994,7 @@ func (db *DB) Sync() error {
+ 	// to the flusher and sets db.mt to nil, so checked here db.mt is live.
+ 	if db.IsClosed() {
+ 		db.lock.RUnlock()
+-		return ErrDBClosed
++		return 0, ErrDBClosed
+ 	}
+ 	// Invariant: both captures happen under this one read lock, so their
+ 	// order does not matter. Captured under two locks with the immutables
+@@ -908,6 +1013,9 @@ func (db *DB) Sync() error {
+ 		imm.IncrRef()
+ 	}
+ 	db.lock.RUnlock()
++	if syncAfterUnlockHook != nil {
++		syncAfterUnlockHook()
++	}
+ 
+ 	// db.imm is in rotation order: ensureRoomForWrite appends, the flusher
+ 	// takes from the front, and openMemTables fills it in file-id order.
+@@ -928,10 +1036,16 @@ func (db *DB) Sync() error {
+ 	}
+ 	active.DecrRef()
+ 
++	if syncValueLogHook != nil {
++		syncValueLogHook()
++	}
+ 	// The value log is synced whatever the WALs returned, as before: a value
+ 	// without the WAL entry that points at it makes no commit visible.
+ 	vLogSyncError := db.vlog.sync()
+-	return y.CombineErrors(memtableSyncError, vLogSyncError)
++	if err := y.CombineErrors(memtableSyncError, vLogSyncError); err != nil {
++		return 0, err
++	}
++	return vouched, nil
+ }
+ 
+ // getMemtables returns the current memtables and get references.
+@@ -1104,6 +1218,15 @@ func (db *DB) writeRequests(reqs []*request) error {
+ 			failFrom(i, err)
+ 			return y.Wrap(err, "writeRequests")
+ 		}
++		// hoardDB: the request is in the memtable; its waiters are released
++		// after this loop (done, failFrom), so a commit that returns is at or
++		// below writtenVersion. A transaction's last entry is its end marker,
++		// which carries its commit version; the requests without one (managed
++		// mode, the value-log GC's rewrite, DB.Load, DB.BanNamespace) come only
++		// from calls refused under a vouched cut.
++		if version := y.ParseTs(b.Entries[len(b.Entries)-1].Key); version > db.writtenVersion.Load() {
++			db.writtenVersion.Store(version)
++		}
+ 	}
+ 
+ 	db.opt.Debugf("Sending updates to subscribers")
+@@ -1255,6 +1378,11 @@ var ErrWritesRefused = errors.New("writes are refused: the memtables cannot be p
+ // table; Close still completes.
+ var ErrL0StalledByDamagedTable = errors.New("level 0 is stalled behind a table that cannot be read")
+ 
++// ErrFlushNotNamed is in the chain of a flush whose MANIFEST change failed: the flush keeps its
++// table and is not retried until the store is reopened (memTable.failedNaming), so writes stay
++// refused until then. hoardDB's BUG-0868.
++var ErrFlushNotNamed = errors.New("a flush could not record its table in the MANIFEST")
++
+ // flushFailuresBeforeRefusal is how many flush attempts in a row must fail
+ // before writes are refused. One failure may be transient; the flush is
+ // retried every flushRetryInterval regardless, and a success lifts the
+@@ -1382,7 +1510,15 @@ func buildL0Table(iter y.Iterator, dropPrefixes [][]byte, bopts table.Options) *
+ }
+ 
+ // handleMemTableFlush must be run serially.
++//
++// hoardDB: on disk the flush names its table in the MANIFEST, removes the
++// memtable's log durably, and only then inserts the table into level 0
++// (flushed_log.go has why). A memtable whose table is already named (a
++// retry after the removal failed) is not built again.
+ func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
++	if !db.opt.InMemory {
++		return db.flushToNamedTable(mt)
++	}
+ 	bopts := buildTableOptions(db)
+ 	itr := mt.sl.NewUniIterator(false)
+ 	builder := buildL0Table(itr, nil, bopts)
+@@ -1397,14 +1533,7 @@ func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
+ 	}
+ 
+ 	fileID := db.lc.reserveFileID()
+-	var tbl *table.Table
+-	var err error
+-	if db.opt.InMemory {
+-		data := builder.Finish()
+-		tbl, err = table.OpenInMemoryTable(data, fileID, &bopts)
+-	} else {
+-		tbl, err = table.CreateTable(table.NewFilename(fileID, db.opt.Dir), builder)
+-	}
++	tbl, err := table.OpenInMemoryTable(builder.Finish(), fileID, &bopts)
+ 	if err != nil {
+ 		return y.Wrap(err, "error while creating table")
+ 	}
+@@ -1414,6 +1543,52 @@ func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
+ 	return err
+ }
+ 
++// flushToNamedTable is handleMemTableFlush on disk. Like upstream's, it
++// builds the table from every entry (buildL0Table is given no prefixes to
++// drop; DropPrefix drops them from the levels afterwards). hoardDB.
++func (db *DB) flushToNamedTable(mt *memTable) error {
++	if mt.nameFailed != nil {
++		return mt.nameFailed
++	}
++	tbl := mt.named
++	if tbl == nil {
++		bopts := buildTableOptions(db)
++		itr := mt.sl.NewUniIterator(false)
++		builder := buildL0Table(itr, nil, bopts)
++		defer builder.Close()
++		if builder.Empty() {
++			builder.Finish()
++			return nil
++		}
++		var err error
++		tbl, err = table.CreateTable(table.NewFilename(db.lc.reserveFileID(), db.opt.Dir), builder)
++		if err != nil {
++			return y.Wrap(err, "error while creating table")
++		}
++		db.flushStep(FlushTableSynced)
++		if err := db.lc.nameLevel0Table(tbl); err != nil {
++			// The MANIFEST may name the table now (BUG-0868): keep the file
++			// and never retry the naming (memTable.failedNaming).
++			mt.failedNaming = tbl
++			mt.nameFailed = fmt.Errorf("%w: naming table %d in the MANIFEST failed, so whether the MANIFEST names it "+
++				"is not known; the table file and the memtable's log are kept and the flush is not retried until the "+
++				"store is reopened: %w", ErrFlushNotNamed, tbl.ID(), err)
++			return mt.nameFailed
++		}
++		mt.named = tbl
++		db.flushStep(FlushTableNamed)
++	}
++	if err := db.retireMemTableLog(mt); err != nil {
++		return err
++	}
++	mt.named = nil
++	db.flushStep(FlushDirectorySynced)
++	db.lc.insertLevel0Table(tbl) // This will incrRef
++	db.flushStep(FlushTableInLevelZero)
++	_ = tbl.DecrRef() // Releases our ref.
++	return nil
++}
++
+ // flushMemtable must keep running until flushChan is closed. A flush that
+ // fails is retried every flushRetryInterval; after flushFailuresBeforeRefusal
+ // failures in a row writes are refused until one succeeds. Once Close has
+@@ -1432,10 +1607,19 @@ func (db *DB) flushMemtable(lc *z.Closer) {
+ 			db.unflushed++
+ 			continue
+ 		}
++		if hook := flushTestHook.Load(); hook != nil {
++			(*hook)(db)
++		}
+ 
+ 		for failures := 1; ; failures++ {
+ 			if err := db.handleMemTableFlush(mt, nil); err != nil {
+-				db.opt.Errorf("error flushing memtable to disk: %v, retrying", err)
++				// A flush that kept its table after a failed naming is not retried: say so once.
++				switch {
++				case !errors.Is(err, ErrFlushNotNamed):
++					db.opt.Errorf("error flushing memtable to disk: %v, retrying", err)
++				case failures == 1:
++					db.opt.Errorf("error flushing memtable to disk: %v", err)
++				}
+ 				if failures >= flushFailuresBeforeRefusal && db.flushRefusal.Load() == nil {
+ 					refusal := fmt.Errorf("%w: flushing a memtable to %s failed %d times in a row: %w",
+ 						ErrWritesRefused, db.opt.Dir, failures, err)
+@@ -1578,6 +1762,9 @@ func (db *DB) updateSize(lc *z.Closer) {
+ // Note: Every time GC is run, it would produce a spike of activity on the LSM
+ // tree.
+ func (db *DB) RunValueLogGC(discardRatio float64) error {
++	if err := db.refuseUnderVouchedCut("DB.RunValueLogGC"); err != nil {
++		return err
++	}
+ 	if db.opt.InMemory {
+ 		return ErrGCInMemoryMode
+ 	}
+@@ -2088,6 +2275,9 @@ func (db *DB) prepareToDrop() (func(), error) {
+ // any reads while DropAll is going on, otherwise they may result in panics. Ideally, both reads and
+ // writes are paused before running DropAll, and resumed after it is finished.
+ func (db *DB) DropAll() error {
++	if err := db.refuseUnderVouchedCut("DB.DropAll"); err != nil {
++		return err
++	}
+ 	f, err := db.dropAll()
+ 	if f != nil {
+ 		f()
+@@ -2154,6 +2344,9 @@ func (db *DB) dropAll() (func(), error) {
+ //   - Compact rest of the levels, Li->Li, picking tables which have Kp.
+ //   - Resume memtable flushes, compactions and writes.
+ func (db *DB) DropPrefix(prefixes ...[]byte) error {
++	if err := db.refuseUnderVouchedCut("DB.DropPrefix"); err != nil {
++		return err
++	}
+ 	if len(prefixes) == 0 {
+ 		return nil
+ 	}
+@@ -2177,7 +2370,20 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
+ 	db.lock.Lock()
+ 	defer db.lock.Unlock()
+ 
++	// hoardDB (BUG-0858's fix, review F1): the active memtable is rotated out
++	// before it is flushed, so a memtable whose flush has named its table or
++	// removed its log is never the active one. Flushed in place, a failure in
++	// the log's removal left it active: writes acknowledged after the failed
++	// drop went into a memtable whose table was already built (and, after a
++	// failed directory fsync, whose log was already gone) and were lost. Now
++	// the failed memtable stays in db.imm for the restarted flusher and new
++	// writes go to a memtable with a log of its own.
++	next, err := db.newMemTable()
++	if err != nil {
++		return fmt.Errorf("cannot create new mem table: %w", err)
++	}
+ 	db.imm = append(db.imm, db.mt)
++	db.mt = next
+ 	for _, memtable := range db.imm {
+ 		if memtable.sl.Empty() {
+ 			memtable.DecrRef()
+@@ -2193,10 +2399,6 @@ func (db *DB) DropPrefix(prefixes ...[]byte) error {
+ 	db.stopCompactions()
+ 	defer db.startCompactions()
+ 	db.imm = db.imm[:0]
+-	db.mt, err = db.newMemTable()
+-	if err != nil {
+-		return y.Wrapf(err, "cannot create new mem table")
+-	}
+ 
+ 	// Drop prefixes from the levels.
+ 	if err := db.lc.dropPrefixes(filtered); err != nil {
+@@ -2245,6 +2447,9 @@ func (db *DB) isBanned(key []byte) error {
+ 
+ // BanNamespace bans a namespace. Read/write to keys belonging to any of such namespace is denied.
+ func (db *DB) BanNamespace(ns uint64) error {
++	if err := db.refuseUnderVouchedCut("DB.BanNamespace"); err != nil {
++		return err
++	}
+ 	if db.opt.NamespaceOffset < 0 {
+ 		return ErrNamespaceMode
+ 	}
+diff --git a/db_sync_linux_test.go b/db_sync_linux_test.go
+index 4e918b5..1e70341 100644
+--- a/db_sync_linux_test.go
++++ b/db_sync_linux_test.go
+@@ -73,6 +73,12 @@ func TestSyncCoversImmutableMemtables(t *testing.T) {
+ 		writeBatch()
+ 		waitForNoImm()
+ 	}
++	// hoardDB: from here the flusher waits in front of each flush, so the
++	// rotated memtable's log stays on disk. At the level-0 stall the flush has
++	// already named its table and removed the log (BUG-0858's fix). Released
++	// before the deferred Close above, which would wait for the flusher.
++	letGo := holdFlushesOf(t, dir)
++	defer letGo()
+ 
+ 	require.NoError(t, db.Update(func(txn *Txn) error {
+ 		return txn.Set([]byte("unsynced"), []byte("committed before the rotation"))
+diff --git a/db_sync_lock_linux_test.go b/db_sync_lock_linux_test.go
+index 4e81ede..6891e2c 100644
+--- a/db_sync_lock_linux_test.go
++++ b/db_sync_lock_linux_test.go
+@@ -301,6 +301,10 @@ func TestSyncActiveWALCoversARotationDuringTheSync(t *testing.T) {
+ 	})
+ 	closeAtCleanup(t, db)
+ 	fillLevelZeroToStall(t, db)
++	// hoardDB: the flusher waits in front of each flush from here, so the
++	// rotated memtable's log stays on disk; at the level-0 stall the flush has
++	// already named its table and removed the log (BUG-0858's fix).
++	holdFlushesOf(t, opt.Dir)
+ 
+ 	committed := map[string][]byte{"in-value-log": make([]byte, 4<<10)}
+ 	for i := range committed["in-value-log"] {
+@@ -369,8 +373,10 @@ func TestSyncActiveWALCoversARotationDuringTheSync(t *testing.T) {
+ // TestSyncActiveWALKeepsTheLogThroughAFlush parks Sync in the active
+ // memtable's msync, rotates that memtable and lets the flusher write it to
+ // level 0 and drop the flusher's reference. Sync's own reference must keep the
+-// WAL, mapped and on disk, until Sync has synced it; then Sync's release
+-// deletes it.
++// WAL mapped, open and at its size until Sync has synced it; then Sync's
++// release closes it. (hoardDB, BUG-0858's fix: the flush removes the log's
++// name before its table is in level 0, whatever references the memtable
++// has, so the file is checked through its descriptor, not its name.)
+ func TestSyncActiveWALKeepsTheLogThroughAFlush(t *testing.T) {
+ 	db, _ := openSyncLockTestDB(t, func(o Options) Options { return o.WithNumCompactors(0) })
+ 	closeAtCleanup(t, db)
+@@ -393,13 +399,14 @@ func TestSyncActiveWALKeepsTheLogThroughAFlush(t *testing.T) {
+ 	require.True(t, flushed, "the captured memtable was not rotated and flushed within %s while Sync was parked",
+ 		syncLockStepTimeout)
+ 
+-	during, err := os.Stat(p.walPath)
+-	require.NoError(t, err, "the WAL Sync is syncing was deleted under it by the flush")
++	_, err = os.Stat(p.walPath)
++	require.True(t, os.IsNotExist(err), "the flushed memtable's WAL %s is still named after its flush: %v", p.walPath, err)
++	during, err := p.mt.wal.Fd.Stat()
++	require.NoError(t, err, "the WAL Sync is syncing was closed under it by the flush")
+ 	require.Equal(t, before.Size(), during.Size(), "the WAL Sync is syncing was truncated under it")
+ 
+ 	require.NoError(t, p.resume(t))
+-	_, err = os.Stat(p.walPath)
+-	require.True(t, os.IsNotExist(err), "the flushed memtable's WAL %s outlived Sync's reference: %v", p.walPath, err)
++	require.Empty(t, openDescriptorsOf(t, p.walPath), "the flushed memtable's WAL %s outlived Sync's reference", p.walPath)
+ }
+ 
+ // TestSyncActiveWALReturnsWhenCloseRacesIt parks Sync in the active memtable's
+@@ -429,8 +436,11 @@ func TestSyncActiveWALReturnsWhenCloseRacesIt(t *testing.T) {
+ 		t.Fatalf("Close did not flush the memtable within %s while Sync was parked: it waited for the msync",
+ 			syncLockStepTimeout)
+ 	}
+-	_, err = os.Stat(p.walPath)
+-	require.NoError(t, err, "Close deleted the WAL the parked Sync holds a reference on")
++	// hoardDB: the flush removed the name (BUG-0858's fix); the parked Sync's
++	// reference keeps the file open and at its size.
++	during, err := p.mt.wal.Fd.Stat()
++	require.NoError(t, err, "Close closed the WAL the parked Sync holds a reference on")
++	require.NotZero(t, during.Size(), "Close truncated the WAL the parked Sync holds a reference on")
+ 	select {
+ 	case err := <-closing:
+ 		t.Fatalf("Close returned (%v) while a Sync was still to sync the value log", err)
+@@ -442,7 +452,8 @@ func TestSyncActiveWALReturnsWhenCloseRacesIt(t *testing.T) {
+ 	require.True(t, closed, "Close did not return within %s of the Sync it raced", syncLockStepTimeout)
+ 	require.NoError(t, err)
+ 	_, err = os.Stat(p.walPath)
+-	require.True(t, os.IsNotExist(err), "the flushed memtable's WAL %s outlived Sync's reference: %v", p.walPath, err)
++	require.True(t, os.IsNotExist(err), "the flushed memtable's WAL %s is still named after Close: %v", p.walPath, err)
++	require.Empty(t, openDescriptorsOf(t, p.walPath), "the flushed memtable's WAL %s outlived Sync's reference", p.walPath)
+ 	require.ErrorIs(t, db.Sync(), ErrDBClosed)
+ 
+ 	reopened, err := Open(opt)
+@@ -476,6 +487,9 @@ func TestSyncActiveWALCaptureIsOneSnapshot(t *testing.T) {
+ 	})
+ 	closeAtCleanup(t, db)
+ 	fillLevelZeroToStall(t, db)
++	// hoardDB: held in front of each flush, as in
++	// TestSyncActiveWALCoversARotationDuringTheSync (BUG-0858's fix).
++	holdFlushesOf(t, db.opt.Dir)
+ 
+ 	db.lock.RLock()
+ 	atCall := db.mt
+diff --git a/db_sync_order_linux_test.go b/db_sync_order_linux_test.go
+index 66df826..62c397a 100644
+--- a/db_sync_order_linux_test.go
++++ b/db_sync_order_linux_test.go
+@@ -60,6 +60,11 @@ func TestSyncCoversRotatedMemtableLogBeforeActive(t *testing.T) {
+ 	})
+ 	closeAtCleanup(t, db)
+ 	fillLevelZeroToStall(t, db)
++	// hoardDB: the flusher waits in front of each flush from here, so the
++	// rotated memtable's log stays on disk, the only copy of its commit. At the
++	// level-0 stall the flush has already named its table and removed the log
++	// (BUG-0858's fix). Released in a cleanup before the close.
++	holdFlushesOf(t, opt.Dir)
+ 
+ 	commit := func(key, value string) {
+ 		t.Helper()
+@@ -160,12 +165,13 @@ func TestSyncCoversRotatedMemtableLogBeforeActive(t *testing.T) {
+ // one commit. logs, commits and atLastSync are in rotation order, oldest
+ // first; the last log is the active one.
+ //
+-// The oldest memtable is the one the flusher holds: its table is written and
+-// named in the MANIFEST before the flusher waits at the level-0 stall, so once
+-// that has happened its commit is durable through the table whatever its log
+-// holds. An image can therefore keep the first commit while the first log is
+-// unsynced. The tests read the order from the logs' page-cache state and from
+-// the second and third commits, never from the first commit alone.
++// The flusher is held in front of the flush of the oldest memtable
++// (holdFlushesOf), so no table is named for it and every log stays on disk.
++// (Held at the level-0 stall instead, as before BUG-0858's fix, the oldest
++// memtable's table was named and its commit durable through it whatever its
++// log held; the fix now removes that log there.) The tests read the order from
++// the logs' page-cache state and from the second and third commits, never from
++// the first commit alone.
+ type rotatedLogsScenario struct {
+ 	db      *DB
+ 	opt     Options
+@@ -186,8 +192,8 @@ func walIsSynced(t *testing.T, walPath string) bool {
+ // openWithTwoRotatedLogs builds the scenario. Each log is synced on its own
+ // while it is the active one and its bytes are saved; then one commit goes into
+ // it, unsynced; then fill writes rotate it out. The flusher is held as in
+-// TestSyncCoversRotatedMemtableLogBeforeActive: it waits at the level-0 stall
+-// with the oldest memtable, and the next one waits in the flush channel.
++// TestSyncCoversRotatedMemtableLogBeforeActive: it waits in front of the
++// flush of the oldest memtable, and the next one waits in the flush channel.
+ func openWithTwoRotatedLogs(t *testing.T) *rotatedLogsScenario {
+ 	t.Helper()
+ 	db, opt := openSyncLockTestDB(t, func(o Options) Options {
+@@ -195,6 +201,7 @@ func openWithTwoRotatedLogs(t *testing.T) *rotatedLogsScenario {
+ 	})
+ 	closeAtCleanup(t, db)
+ 	fillLevelZeroToStall(t, db)
++	holdFlushesOf(t, opt.Dir)
+ 
+ 	scenario := &rotatedLogsScenario{db: db, opt: opt, commits: [3]string{"first", "second", "third"}}
+ 	activeMemtable := func() *memTable {
+diff --git a/flush_failure_test.go b/flush_failure_test.go
+index 44482ed..f740cfd 100644
+--- a/flush_failure_test.go
++++ b/flush_failure_test.go
+@@ -12,6 +12,7 @@ import (
+ 	"path/filepath"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"testing"
+ 	"time"
+ 
+@@ -352,3 +353,187 @@ func TestAFlushRefusalWithRoomInTheMemtableRefusesWrites(t *testing.T) {
+ 		t.Fatal("Close did not return within 15 s")
+ 	}
+ }
++
++// TestAManifestSyncFailingOnceInAFlushLeavesAStoreThatReopens is BUG-0868's
++// failing-first test. A flush names its table in the MANIFEST; the record is
++// applied in memory and written before the sync, so when the sync fails the
++// record may be on disk (it is, with this injection) while upstream's failure
++// path deleted the table file, and the retry named a second table. The store
++// ran on and did not reopen: "file does not exist for table 1". The fix keeps
++// the table file and does not retry the naming (the failed-fsync argument C1
++// applied to the directory), so whatever the MANIFEST holds, the next open
++// finds a consistent store. The test needs the failure to have happened, waits
++// until the flush either finished or refused writes, closes, and reopens with
++// every written key.
++func TestAManifestSyncFailingOnceInAFlushLeavesAStoreThatReopens(t *testing.T) {
++	dir := t.TempDir()
++	opts := getTestOptions(dir).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10)
++	db, err := Open(opts)
++	require.NoError(t, err)
++	var failures atomic.Int32
++	original := syncFunc
++	syncFunc = func(f *os.File) error {
++		if failures.CompareAndSwap(0, 1) {
++			return errors.New("injected: the MANIFEST sync failed once")
++		}
++		return original(f)
++	}
++	defer func() { syncFunc = original }()
++
++	rotated := activeMemTable(db)
++	var written []string
++	for index := 0; activeMemTable(db) == rotated; index++ {
++		require.Less(t, index, 100000, "the memtable never rotated")
++		key := fmt.Sprintf("key-%06d", index)
++		require.NoError(t, db.Update(func(txn *Txn) error { return txn.Set([]byte(key), make([]byte, 512)) }))
++		written = append(written, key)
++	}
++	deadline := time.Now().Add(30 * time.Second)
++	for failures.Load() == 0 || (numImmutables(db) > 0 && db.flushRefusal.Load() == nil) {
++		require.True(t, time.Now().Before(deadline), "SCENARIO NOT REACHED: the flush neither failed, finished nor refused writes in 30 s")
++		time.Sleep(10 * time.Millisecond)
++	}
++	require.Equal(t, int32(1), failures.Load(), "SCENARIO NOT REACHED: the MANIFEST sync did not fail")
++	// Close reports the memtable it could not flush, after the fix; its error is not the result.
++	t.Logf("Close after the failed sync: %v", db.Close())
++
++	reopened, err := Open(opts)
++	require.NoError(t, err, "the store does not reopen after one failed MANIFEST sync in a flush")
++	defer func() { require.NoError(t, reopened.Close()) }()
++	// The naming is not retried: the one memtable gives one table, the one the
++	// failed change named, and no second table holds the same entries.
++	require.Len(t, reopened.Tables(), 1, "the flush was retried after its MANIFEST change failed")
++	require.NoError(t, reopened.View(func(txn *Txn) error {
++		for _, key := range written {
++			if _, err := txn.Get([]byte(key)); err != nil {
++				return fmt.Errorf("%s after the reopen: %w", key, err)
++			}
++		}
++		return nil
++	}))
++}
++
++// failManifestSyncOnce makes the next MANIFEST sync fail once and returns how many failed, for a
++// test to require the failure happened; it restores syncFunc at the test's end.
++func failManifestSyncOnce(t *testing.T) *atomic.Int32 {
++	t.Helper()
++	var failures atomic.Int32
++	original := syncFunc
++	syncFunc = func(f *os.File) error {
++		if failures.CompareAndSwap(0, 1) {
++			return errors.New("injected: the MANIFEST sync failed once")
++		}
++		return original(f)
++	}
++	t.Cleanup(func() { syncFunc = original })
++	return &failures
++}
++
++// writeUntilRotated writes 512-byte values under prefix until the active memtable rotates, and
++// returns the keys.
++func fillUntilRotated(t *testing.T, db *DB, prefix string) []string {
++	t.Helper()
++	rotated := activeMemTable(db)
++	var written []string
++	for index := 0; activeMemTable(db) == rotated; index++ {
++		require.Less(t, index, 100000, "the memtable never rotated")
++		key := fmt.Sprintf("%s-%06d", prefix, index)
++		require.NoError(t, db.Update(func(txn *Txn) error { return txn.Set([]byte(key), make([]byte, 512)) }))
++		written = append(written, key)
++	}
++	return written
++}
++
++// requireKeys requires every key in db.
++func requireKeys(t *testing.T, db *DB, keys []string) {
++	t.Helper()
++	require.NoError(t, db.View(func(txn *Txn) error {
++		for _, key := range keys {
++			if _, err := txn.Get([]byte(key)); err != nil {
++				return fmt.Errorf("%s: %w", key, err)
++			}
++		}
++		return nil
++	}))
++}
++
++// TestAManifestRecordLostAfterAFailedSyncLeavesAStoreThatReopens is BUG-0868's other branch: the
++// failed sync's record did not reach the disk (the MANIFEST is cut back to its size before the
++// failed change), in the first flush and in a second one. The kept table is then unnamed: Badger
++// deletes it at the next open and replays the memtable's log, which the fix never removed; every
++// key is there (review R2 F-9).
++func TestAManifestRecordLostAfterAFailedSyncLeavesAStoreThatReopens(t *testing.T) {
++	for _, flush := range []int{1, 2} {
++		t.Run(fmt.Sprintf("flush %d", flush), func(t *testing.T) {
++			dir := t.TempDir()
++			opts := getTestOptions(dir).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10)
++			db, err := Open(opts)
++			require.NoError(t, err)
++			var written []string
++			if flush == 2 {
++				written = append(written, fillUntilRotated(t, db, "first")...)
++				deadline := time.Now().Add(30 * time.Second)
++				for numImmutables(db) > 0 {
++					require.True(t, time.Now().Before(deadline), "SCENARIO NOT REACHED: the first flush did not finish")
++					time.Sleep(10 * time.Millisecond)
++				}
++			}
++			manifest := filepath.Join(dir, ManifestFilename)
++			before, err := os.Stat(manifest)
++			require.NoError(t, err)
++			failures := failManifestSyncOnce(t)
++			written = append(written, fillUntilRotated(t, db, "failed")...)
++			deadline := time.Now().Add(30 * time.Second)
++			for failures.Load() == 0 || db.flushRefusal.Load() == nil {
++				require.True(t, time.Now().Before(deadline), "SCENARIO NOT REACHED: the flush did not fail and refuse writes")
++				time.Sleep(10 * time.Millisecond)
++			}
++			t.Logf("Close after the failed sync: %v", db.Close())
++			cutManifestTo(t, manifest, before.Size())
++
++			reopened, err := Open(opts)
++			require.NoError(t, err, "the store does not reopen when the failed record did not reach the disk")
++			defer func() { require.NoError(t, reopened.Close()) }()
++			requireKeys(t, reopened, written)
++		})
++	}
++}
++
++// cutManifestTo shortens the test's MANIFEST to size, as a failed sync that lost the last record
++// leaves it.
++func cutManifestTo(t *testing.T, manifest string, size int64) {
++	t.Helper()
++	file, err := os.OpenFile(manifest, os.O_RDWR, 0)
++	require.NoError(t, err)
++	require.NoError(t, file.Truncate(size), "cutting the failed record off the MANIFEST")
++	require.NoError(t, file.Close())
++}
++
++// TestADropPrefixWhoseManifestSyncFailsOnceLeavesAStoreThatReopens is BUG-0868's drop-shaped twin:
++// DropPrefix flushes the memtables before it drops; a MANIFEST sync failing once in that flush fails
++// the drop with the kept error, and the store reopens holding every key the drop did not drop
++// (review R2 F-9, the reviewer's TestR2ManifestSyncFailsOnceInADropPrefix).
++func TestADropPrefixWhoseManifestSyncFailsOnceLeavesAStoreThatReopens(t *testing.T) {
++	dir := t.TempDir()
++	opts := getTestOptions(dir).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10)
++	db, err := Open(opts)
++	require.NoError(t, err)
++	var kept []string
++	for index := range 200 {
++		key := fmt.Sprintf("kept-%04d", index)
++		require.NoError(t, db.Update(func(txn *Txn) error { return txn.Set([]byte(key), make([]byte, 512)) }))
++		kept = append(kept, key)
++	}
++	// A drop with nothing under its prefix returns before it flushes.
++	require.NoError(t, db.Update(func(txn *Txn) error { return txn.Set([]byte("dropped-1"), []byte("goes")) }))
++	failures := failManifestSyncOnce(t)
++	dropErr := db.DropPrefix([]byte("dropped-"))
++	require.Equal(t, int32(1), failures.Load(), "SCENARIO NOT REACHED: the drop's flush did not sync the MANIFEST")
++	require.Error(t, dropErr, "the drop succeeded over a failed MANIFEST sync")
++	t.Logf("Close after the failed drop: %v", db.Close())
++
++	reopened, err := Open(opts)
++	require.NoError(t, err, "the store does not reopen after a drop whose MANIFEST sync failed")
++	defer func() { require.NoError(t, reopened.Close()) }()
++	requireKeys(t, reopened, kept)
++}
+diff --git a/flush_naming_linux_test.go b/flush_naming_linux_test.go
+new file mode 100644
+index 0000000..d60b403
+--- /dev/null
++++ b/flush_naming_linux_test.go
+@@ -0,0 +1,119 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-19: Close closes the table of a
++ * flush whose MANIFEST change failed (hoardDB's BUG-0868). See
++ * hoardDB/third_party/README.md.
++ */
++
++package badger
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++// openTableFilesIn lists the files of dir ending in .sst that this process holds open.
++func openTableFilesIn(t *testing.T, dir string) []string {
++	t.Helper()
++	entries, err := os.ReadDir("/proc/self/fd")
++	require.NoError(t, err)
++	var open []string
++	for _, entry := range entries {
++		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
++		if err != nil {
++			continue // a descriptor closed while the directory was read
++		}
++		if strings.HasPrefix(target, dir+string(os.PathSeparator)) && strings.HasSuffix(target, ".sst") {
++			open = append(open, target)
++		}
++	}
++	return open
++}
++
++// TestCloseClosesTheTableOfAFailedNaming: [GUARD Close closes and keeps the table a flush kept when
++// its MANIFEST change failed; red when DB.releaseNamedTables skips it, leaving its file open past
++// Close] (review R2 F-9, mutation X7). The file itself stays for the next open.
++func TestCloseClosesTheTableOfAFailedNaming(t *testing.T) {
++	dir := t.TempDir()
++	opts := getTestOptions(dir).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10)
++	db, err := Open(opts)
++	require.NoError(t, err)
++	failures := failManifestSyncOnce(t)
++	fillUntilRotated(t, db, "kept")
++	deadline := time.Now().Add(30 * time.Second)
++	for failures.Load() == 0 || db.flushRefusal.Load() == nil {
++		require.True(t, time.Now().Before(deadline), "SCENARIO NOT REACHED: the flush did not fail and refuse writes")
++		time.Sleep(10 * time.Millisecond)
++	}
++	require.NotEmpty(t, openTableFilesIn(t, dir), "SCENARIO NOT REACHED: no kept table is open before Close")
++	t.Logf("Close after the failed sync: %v", db.Close())
++	require.Empty(t, openTableFilesIn(t, dir), "Close left the kept table open")
++	tables, err := filepath.Glob(filepath.Join(dir, "*.sst"))
++	require.NoError(t, err)
++	require.Len(t, tables, 1, "Close did not keep the table on disk")
++}
++
++// recordingLogger keeps the lines Badger logs at error level.
++type recordingLogger struct {
++	mu     sync.Mutex
++	errors []string
++}
++
++func (l *recordingLogger) Errorf(format string, args ...interface{}) {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	l.errors = append(l.errors, fmt.Sprintf(format, args...))
++}
++func (l *recordingLogger) Warningf(string, ...interface{}) {}
++func (l *recordingLogger) Infof(string, ...interface{})    {}
++func (l *recordingLogger) Debugf(string, ...interface{})   {}
++
++func (l *recordingLogger) lines() []string {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return append([]string(nil), l.errors...)
++}
++
++// TestAFailedNamingIsLoggedOnceAndNotAsARetry: [GUARD a flush whose MANIFEST change failed is
++// logged once, saying it is not retried until the store is reopened, and writes are refused with
++// ErrFlushNotNamed in the chain; red when the flusher logs 'retrying' once a second for a flush it
++// does not retry] (review R2 F-9).
++func TestAFailedNamingIsLoggedOnceAndNotAsARetry(t *testing.T) {
++	dir := t.TempDir()
++	logger := &recordingLogger{}
++	opts := getTestOptions(dir).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10).WithLogger(logger)
++	db, err := Open(opts)
++	require.NoError(t, err)
++	defer func() { t.Logf("Close: %v", db.Close()) }()
++	failures := failManifestSyncOnce(t)
++	fillUntilRotated(t, db, "kept")
++	deadline := time.Now().Add(30 * time.Second)
++	for failures.Load() == 0 || db.flushRefusal.Load() == nil {
++		require.True(t, time.Now().Before(deadline), "SCENARIO NOT REACHED: the flush did not fail and refuse writes")
++		time.Sleep(10 * time.Millisecond)
++	}
++	time.Sleep(2 * flushRetryInterval)
++	var named, retrying int
++	for _, line := range logger.lines() {
++		if strings.Contains(line, "not retried until the store is reopened") {
++			named++
++		}
++		if strings.Contains(line, "retrying") {
++			retrying++
++		}
++	}
++	require.Equal(t, 1, named, "the failed naming was not logged once: %q", logger.lines())
++	require.Zero(t, retrying, "the flusher says it is retrying a flush it does not retry: %q", logger.lines())
++	refusal := db.WriteRefusal()
++	require.ErrorIs(t, refusal, ErrWritesRefused)
++	require.ErrorIs(t, refusal, ErrFlushNotNamed)
++}
+diff --git a/flushed_log.go b/flushed_log.go
+new file mode 100644
+index 0000000..dc9e4fd
+--- /dev/null
++++ b/flushed_log.go
+@@ -0,0 +1,264 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-18: a flushed memtable's log is
++ * removed, durably, after the MANIFEST names its table and before the table
++ * is in a level, and Open removes a log whose table the MANIFEST already
++ * names instead of replaying it (hoardDB's BUG-0858). See
++ * hoardDB/third_party/README.md. 2026-11-19: Close also keeps the table of a
++ * flush whose MANIFEST change failed (hoardDB's BUG-0868).
++ */
++
++package badger
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"sync/atomic"
++
++	"github.com/dgraph-io/ristretto/v2/z"
++)
++
++// Why. Badger removed a flushed memtable's log when the memtable's last
++// reference went, with no directory fsync, and nothing synced that log at the
++// flush. A reader or a sync capture kept it on disk after its table was in
++// level 0, where a compaction can drop a delete marker together with the
++// versions under it. After a crash the log was replayed: under hoardDB's
++// vouched cut its entries at or below the vouched version were kept and the
++// delete above it discarded, and after a power cut the log could hold a set
++// without the delete that followed. Either way a deleted key came back.
++//
++// The order that closes it, per flush: the table is synced (CreateTable), the
++// MANIFEST change naming it is synced (levelsController.nameLevel0Table), the
++// log is unlinked and the directory fsynced (DB.retireMemTableLog), and only
++// then is the table inserted into level 0 (levelsController.insertLevel0Table),
++// where a compaction can pick it. So no compaction ever reads a table whose
++// log a crash can leave on disk. A crash inside that window can leave the log
++// beside its named table; Open removes such a log, durably, before any
++// compaction starts (DB.removeLogsOfNamedTables).
++
++// retireRemoveLog and retireSyncDir remove a flushed log and fsync the store
++// directory; tests replace them to inject a failure or to stop inside the
++// retirement.
++var (
++	retireRemoveLog = os.Remove
++	retireSyncDir   = syncDir
++)
++
++// retireMemTableLog removes the log of a memtable whose table the MANIFEST
++// names, and makes the removal durable. The name goes now whatever references
++// the memtable has: a reader reads the skiplist, which never needed the log,
++// and a sync capture msyncs the unlinked file; the last reference releases it
++// (logFile.closeRetired). A failed unlink can be retried. A failed directory
++// fsync cannot: after one, a later fsync can succeed without the unlink having
++// reached the disk, so the failure is kept and returned by every retry, the
++// table stays out of level 0, the flush loop refuses writes (change 4), and
++// the next Open makes the removal durable: it removes the log if it is still
++// there, and fsyncs the directory in any case before compactions start
++// (removeLogsOfNamedTables). The memtable is never the active one: the
++// flusher takes only rotated memtables, and DropPrefix rotates the active one
++// out before it flushes it.
++func (db *DB) retireMemTableLog(mt *memTable) error {
++	if mt.retireFailed != nil {
++		return mt.retireFailed
++	}
++	if !mt.logRetired.Load() {
++		if err := retireRemoveLog(mt.wal.path); err != nil && !errors.Is(err, os.ErrNotExist) {
++			return fmt.Errorf("while removing the flushed memtable log %s: %w", mt.wal.path, err)
++		}
++		mt.logRetired.Store(true)
++		db.flushStep(FlushLogUnlinked)
++	}
++	if err := retireSyncDir(db.opt.Dir); err != nil {
++		mt.retireFailed = fmt.Errorf("syncing the directory %s after removing the flushed memtable log %s failed, "+
++			"so the removal is not known to be durable; its table stays out of level 0 until the store is reopened: %w",
++			db.opt.Dir, mt.wal.path, err)
++		return mt.retireFailed
++	}
++	return nil
++}
++
++// releaseNamedTables runs in DB.close after the flusher has stopped: a
++// memtable whose table the MANIFEST names and whose log's removal never became
++// durable keeps that table out of every level. The table is closed and kept on
++// disk: the next Open loads it from the MANIFEST and removes the log
++// (removeLogsOfNamedTables). DecrRef would delete the file of a named table.
++// It returns how many such tables it closed: their memtables' writes are all in
++// them, and Close says so instead of "their logs are replayed".
++func (db *DB) releaseNamedTables() (int, error) {
++	var errs []error
++	released := 0
++	for _, mt := range db.imm {
++		// A table whose naming failed is kept too, and not counted: its log
++		// was never removed (memTable.failedNaming, BUG-0868).
++		if mt.failedNaming != nil {
++			if err := mt.failedNaming.Close(-1); err != nil {
++				errs = append(errs, fmt.Errorf("closing table %d, whose naming in the MANIFEST failed: %w", mt.failedNaming.ID(), err))
++			}
++			mt.failedNaming = nil
++		}
++		if mt.named == nil {
++			continue
++		}
++		if err := mt.named.Close(-1); err != nil {
++			errs = append(errs, fmt.Errorf("closing table %d, which the MANIFEST names and no level holds: %w", mt.named.ID(), err))
++		}
++		mt.named = nil
++		released++
++	}
++	return released, errors.Join(errs...)
++}
++
++// removeLogsOfNamedTables runs in Open after the levels are loaded and before
++// any compaction or flush starts. A replayed log whose every entry is at or
++// below the tables' highest version belongs to a memtable whose table the
++// MANIFEST already names: commit versions are written in order and memtables
++// are flushed in order, so a memtable never flushed holds only versions above
++// every table's. Such a log is what a crash inside the retirement leaves (its
++// table is in no compaction's output yet) or, in a store last run before this
++// change, a log a reader kept past its flush. Its entries are in the tables or
++// were dropped there by a compaction, as they may be; replayed, they would be
++// flushed into a second table that can outlive a compaction of the first and
++// bring back what that compaction dropped. The logs go.
++//
++// Then the directory is fsynced, whether or not this open removed anything
++// (review F2): an unlink an earlier process applied, by a flush whose directory
++// fsync failed or by an open that failed after its own unlink, can be in the
++// page cache only, and this open no longer sees that log. Without the fsync,
++// compactions would start on its table, and a power cut afterwards could bring
++// the log back beside tables they have cut. One directory fsync per open.
++//
++// Relies on the version order: DB.RunValueLogGC, DB.Load, the stream writer,
++// DB.BanNamespace and managed mode write at versions they choose. Under a
++// vouched cut they are refused; managed mode skips the removal (not the
++// fsync); hoardDB's other stores call none of them (DropPrefix keeps versions).
++func (db *DB) removeLogsOfNamedTables() error {
++	if db.opt.InMemory {
++		return nil
++	}
++	var removed []string
++	var tablesHighest uint64
++	if !db.opt.managedTxns && len(db.imm) > 0 {
++		for _, info := range db.Tables() {
++			tablesHighest = max(tablesHighest, info.MaxVersion)
++		}
++		kept := db.imm[:0]
++		for _, mt := range db.imm {
++			if mt.maxVersion > tablesHighest {
++				kept = append(kept, mt)
++				continue
++			}
++			if err := retireRemoveLog(mt.wal.path); err != nil && !errors.Is(err, os.ErrNotExist) {
++				return fmt.Errorf("while removing the memtable log %s, whose table the MANIFEST already names: %w", mt.wal.path, err)
++			}
++			mt.logRetired.Store(true)
++			removed = append(removed, mt.wal.path)
++			mt.DecrRef()
++		}
++		db.imm = kept
++	}
++	if err := retireSyncDir(db.opt.Dir); err != nil {
++		return fmt.Errorf("while syncing the directory %s before compactions start (memtable logs this open removed, "+
++			"whose tables the MANIFEST already names: %v): %w", db.opt.Dir, removed, err)
++	}
++	if len(removed) > 0 {
++		db.vouchedReport.LogsOfNamedTables = len(removed)
++		db.opt.Infof("Removed %d memtable logs whose tables the MANIFEST already names (at or below version %d): %v",
++			len(removed), tablesHighest, removed)
++	}
++	return nil
++}
++
++// flushTestHook is set only by tests (SetFlushTestHook).
++var flushTestHook atomic.Pointer[func(*DB)]
++
++// SetFlushTestHook installs a function DB.flushMemtable calls with its DB
++// before it flushes each memtable, and returns the function that puts the
++// previous hook back. A hook that blocks holds that DB's flusher in front of
++// the flush: the memtable stays in db.imm and its log stays on disk, the only
++// copy of its commits. The hook is package-wide; a test that sets it compares
++// the DB (DB.Opts().Dir) and returns at once for any other. Production code
++// must not call it. hoardDB.
++func SetFlushTestHook(hook func(db *DB)) (restore func()) {
++	var next *func(*DB)
++	if hook != nil {
++		next = &hook
++	}
++	previous := flushTestHook.Swap(next)
++	return func() { flushTestHook.Store(previous) }
++}
++
++// openCompactionsHook is called by Open, with the store directory, right
++// before it starts the compactions; tests replace it to see what has happened
++// by then (the open step's directory fsync must be before it).
++var openCompactionsHook = func(dir string) {}
++
++// FlushStep names a point inside a flush at which FlushStepHook is called. The
++// points are the ones a crash can land between, in the order the flush takes
++// them (DB.flushToNamedTable).
++type FlushStep string
++
++// The steps of a flush to disk, in order.
++const (
++	// FlushTableSynced: the table file is written and synced; the MANIFEST does
++	// not name it and the memtable's log is on disk.
++	FlushTableSynced FlushStep = "table synced"
++	// FlushTableNamed: the MANIFEST change naming the table is synced; the log
++	// is still on disk.
++	FlushTableNamed FlushStep = "table named"
++	// FlushLogUnlinked: the log is unlinked; the directory is not yet fsynced.
++	FlushLogUnlinked FlushStep = "log unlinked"
++	// FlushDirectorySynced: the directory is fsynced after the unlink; the
++	// table is in no level yet.
++	FlushDirectorySynced FlushStep = "directory synced"
++	// FlushTableInLevelZero: the table is in level 0, where a compaction can
++	// pick it; the flush is complete except for advancing db.imm.
++	FlushTableInLevelZero FlushStep = "table in level 0"
++)
++
++// flushStepHook is set only by tests (SetFlushStepHook).
++var flushStepHook atomic.Pointer[func(step FlushStep, db *DB)]
++
++// SetFlushStepHook installs a function the flusher calls, on its own
++// goroutine, at each FlushStep of a flush to disk, and returns the function
++// that puts the previous hook back. The flusher does nothing else while the
++// hook runs, so a test can copy the store directory at exactly that point: the
++// images of every instant a crash can land at. The hook is package-wide; a
++// test compares DB.Opts().Dir and returns at once for any other store.
++// Production code must not call it. hoardDB.
++func SetFlushStepHook(hook func(step FlushStep, db *DB)) (restore func()) {
++	var next *func(step FlushStep, db *DB)
++	if hook != nil {
++		next = &hook
++	}
++	previous := flushStepHook.Swap(next)
++	return func() { flushStepHook.Store(previous) }
++}
++
++func (db *DB) flushStep(step FlushStep) {
++	if hook := flushStepHook.Load(); hook != nil {
++		(*hook)(step, db)
++	}
++}
++
++// closeRetired releases a log whose name the flush already removed
++// (DB.retireMemTableLog): it unmaps the file, drops its pages (an unlinked
++// file needs no writeback) and closes it.
++func (lf *logFile) closeRetired() error {
++	if lf.Fd == nil {
++		return nil
++	}
++	if err := z.Munmap(lf.Data); err != nil {
++		return fmt.Errorf("while munmap file: %s, error: %w", lf.Fd.Name(), err)
++	}
++	lf.Data = nil
++	if err := lf.Fd.Truncate(0); err != nil {
++		return fmt.Errorf("while truncate file: %s, error: %w", lf.Fd.Name(), err)
++	}
++	if err := lf.Fd.Close(); err != nil {
++		return fmt.Errorf("while close file: %s, error: %w", lf.Fd.Name(), err)
++	}
++	return nil
++}
+diff --git a/flushed_log_order_test.go b/flushed_log_order_test.go
+new file mode 100644
+index 0000000..bc9a8b2
+--- /dev/null
++++ b/flushed_log_order_test.go
+@@ -0,0 +1,97 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-18: the gate tests of the open step
++ * (DB.removeLogsOfNamedTables) and the flush step hook. The open step removes
++ * every replayed log whose highest version is at or below the tables' highest,
++ * which is sound only while commit versions are issued in write order. These
++ * tests pin what keeps that true. See hoardDB/third_party/README.md.
++ */
++
++package badger
++
++import (
++	"math"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// TestManagedModeKeepsTheLogOfACommitBelowTheTables writes at versions the
++// caller chooses, out of order: a table holds version 10, and the next
++// memtable's log holds a commit at version 5. The open step would take that log
++// for the leftover of a flush whose table the MANIFEST names and remove it, and
++// the commit would be lost; managed mode must skip the removal (the review's
++// version-order gate: DB.removeLogsOfNamedTables). Red when the managed-mode
++// condition is removed from the step.
++func TestManagedModeKeepsTheLogOfACommitBelowTheTables(t *testing.T) {
++	dir := t.TempDir()
++	opt := cutTestOptions(dir)
++	db, err := OpenManaged(opt)
++	require.NoError(t, err)
++	closeAtCleanup(t, db)
++
++	writeAt := func(commitVersion uint64, prefix string, count int) {
++		batch := db.NewWriteBatchAt(commitVersion)
++		for i := range count {
++			require.NoError(t, batch.Set([]byte(prefix+string(rune('a'+i%26))+string(rune('a'+i/26))), make([]byte, 512)))
++		}
++		require.NoError(t, batch.Flush())
++	}
++	first := activeMemTable(db)
++	for round := 0; activeMemTable(db) == first; round++ {
++		require.Less(t, round, 1000, "the first memtable never rotated")
++		writeAt(10, "high-", 64)
++	}
++	waitUntilNoImmutables(t, db)
++	var tablesHighest uint64
++	for _, info := range db.Tables() {
++		tablesHighest = max(tablesHighest, info.MaxVersion)
++	}
++	require.Equal(t, uint64(10), tablesHighest, "SCENARIO NOT REACHED: the flushed table does not hold version 10")
++
++	writeAt(5, "late-", 1)
++	require.NoError(t, db.Sync())
++	imageDir := writeImage(t, imageAt(t, dir))
++
++	reopened, err := OpenManaged(opt.WithDir(imageDir).WithValueDir(imageDir))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, reopened.Close()) }()
++	txn := reopened.NewTransactionAt(math.MaxUint64, false)
++	defer txn.Discard()
++	_, err = txn.Get([]byte("late-aa"))
++	require.NoError(t, err, "a commit at version 5, in a log beside a table holding version 10, was removed by the open step "+
++		"in managed mode, where commit versions are the caller's and the step's premise does not hold")
++}
++
++// TestALegacyDropPrefixKeepsTheVersionOrderTheOpenStepRelies is the one call
++// of hoardDB's legacy store that rewrites tables behind the flusher's back
++// (DB.DropPrefix); it keeps the versions it finds and the next commit takes a
++// version above every table's, so a log written after a drop is never at or
++// below the tables' highest version and the open step keeps it. If a drop ever
++// reset or lowered versions, this commit would be lost at the reopen.
++func TestALegacyDropPrefixKeepsTheVersionOrderTheOpenStepRelies(t *testing.T) {
++	dir := t.TempDir()
++	opt := cutTestOptions(dir)
++	db, err := Open(opt)
++	require.NoError(t, err)
++	closeAtCleanup(t, db)
++
++	setKey(t, db, "drop-1")
++	setKey(t, db, "keep-1")
++	require.NoError(t, commitUntilRotatedFrom(db, activeMemTable(db), "fill"))
++	waitUntilNoImmutables(t, db)
++	require.NoError(t, db.DropPrefix([]byte("drop-")))
++	setKey(t, db, "after-the-drop")
++	require.NoError(t, db.Sync())
++	imageDir := writeImage(t, imageAt(t, dir))
++
++	reopened, err := Open(opt.WithDir(imageDir).WithValueDir(imageDir))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, reopened.Close()) }()
++	require.True(t, hasKey(t, reopened, "after-the-drop"), "a commit after a DropPrefix is gone after a reopen: the open step took its "+
++		"log for the leftover of a flushed memtable")
++	require.True(t, hasKey(t, reopened, "keep-1"))
++	require.False(t, hasKey(t, reopened, "drop-1"), "the dropped key is back")
++}
+diff --git a/flushed_log_retire_linux_test.go b/flushed_log_retire_linux_test.go
+new file mode 100644
+index 0000000..e3d241d
+--- /dev/null
++++ b/flushed_log_retire_linux_test.go
+@@ -0,0 +1,92 @@
++//go:build linux
++
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-18: BUG-0858's fix under a reader and
++ * a parked sync (change 12, the flushed log's retirement). See
++ * hoardDB/third_party/README.md.
++ */
++
++package badger
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// openDescriptorsOf returns the targets of this process's descriptors that
++// name path (an unlinked file reads "<path> (deleted)").
++func openDescriptorsOf(t *testing.T, path string) []string {
++	t.Helper()
++	entries, err := os.ReadDir("/proc/self/fd")
++	require.NoError(t, err)
++	var open []string
++	for _, entry := range entries {
++		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
++		if err == nil && strings.HasPrefix(target, path) {
++			open = append(open, target)
++		}
++	}
++	return open
++}
++
++// TestARetiredLogServesItsReaderAndAParkedSync retires a memtable's log while
++// a reader holds the memtable and a DB.SyncVouched that captured it is parked
++// before its msyncs. The sync then msyncs the unlinked mapping and succeeds,
++// the reader reads every key, and once both have let go the file is released:
++// no descriptor of this process names it.
++func TestARetiredLogServesItsReaderAndAParkedSync(t *testing.T) {
++	for _, open := range retireOpens {
++		t.Run(open.name, func(t *testing.T) {
++			dir := t.TempDir()
++			db, err := Open(open.tune(cutTestOptions(dir)))
++			require.NoError(t, err)
++			closeAtCleanup(t, db)
++			first := activeMemTable(db)
++			logPath := first.wal.path
++			for i := range 8 {
++				setKey(t, db, fmt.Sprintf("held-%d", i))
++			}
++
++			letGo := holdFlushesOf(t, dir)
++			require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++			reader := db.NewTransaction(false)
++			pin := reader.NewIterator(DefaultIteratorOptions)
++
++			parked, resume := make(chan struct{}), make(chan struct{})
++			restore := SetSyncTestHooks(SyncTestHooks{AfterCapture: func() {
++				close(parked)
++				<-resume
++			}})
++			defer restore()
++			synced := make(chan error, 1)
++			go func() {
++				_, err := db.SyncVouched()
++				synced <- err
++			}()
++			<-parked
++			letGo()
++			waitUntilNoImmutables(t, db)
++			_, statErr := os.Stat(logPath)
++			require.ErrorIs(t, statErr, os.ErrNotExist, "the flushed log is still on disk while a reader and a sync hold its memtable")
++			close(resume)
++			require.NoError(t, <-synced, "a sync that captured the memtable failed after its log was removed")
++
++			found := 0
++			for pin.Seek([]byte("held-")); pin.ValidForPrefix([]byte("held-")); pin.Next() {
++				found++
++			}
++			require.Equal(t, 8, found, "the reader of the retired memtable lost keys")
++			pin.Close()
++			reader.Discard()
++			require.Empty(t, openDescriptorsOf(t, logPath), "the retired log is still open after its last reference went")
++		})
++	}
++}
+diff --git a/flushed_log_retire_test.go b/flushed_log_retire_test.go
+new file mode 100644
+index 0000000..dd0d8d9
+--- /dev/null
++++ b/flushed_log_retire_test.go
+@@ -0,0 +1,762 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-18: the tests of BUG-0858's fix
++ * (change 12, the flushed log's retirement). A flush removes its memtable's
++ * log, durably, after the MANIFEST names the table and before a compaction
++ * can see the table; Open removes a log whose table the MANIFEST already
++ * names instead of replaying it. See hoardDB/third_party/README.md.
++ */
++
++package badger
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++// retireOpens are the two opens the retirement applies to: with a vouched
++// cut (the ring store) and without (the legacy store, OpenBadgerKV).
++var retireOpens = []struct {
++	name string
++	tune func(Options) Options
++}{
++	{"vouched", func(o Options) Options { return o.WithVouchedCut(0) }},
++	{"legacy", func(o Options) Options { return o }},
++}
++
++// namedButNotVisible returns the ids of the tables the MANIFEST names that
++// are in no level: a flush's table between its MANIFEST change and its
++// insertion into level 0.
++func namedButNotVisible(db *DB) []uint64 {
++	visible := map[uint64]bool{}
++	for _, table := range db.Tables() {
++		visible[table.ID] = true
++	}
++	db.manifest.appendLock.Lock()
++	defer db.manifest.appendLock.Unlock()
++	var ids []uint64
++	for id := range db.manifest.manifest.Tables {
++		if !visible[id] {
++			ids = append(ids, id)
++		}
++	}
++	return ids
++}
++
++// namedTableCount returns how many tables the MANIFEST names.
++func namedTableCount(db *DB) int {
++	db.manifest.appendLock.Lock()
++	defer db.manifest.appendLock.Unlock()
++	return len(db.manifest.manifest.Tables)
++}
++
++// waitForANamedTableOutOfTheLevels waits until the MANIFEST names a table
++// that is in no level and returns its id.
++func waitForANamedTableOutOfTheLevels(t *testing.T, db *DB) uint64 {
++	t.Helper()
++	deadline := time.Now().Add(30 * time.Second)
++	for {
++		if ids := namedButNotVisible(db); len(ids) == 1 {
++			return ids[0]
++		}
++		require.True(t, time.Now().Before(deadline), "no flush named a table and stopped before level 0 within 30 s")
++		time.Sleep(5 * time.Millisecond)
++	}
++}
++
++// heldMemTable returns the memtable the flusher holds at the level-0 stall
++// after holdTheFlusher: the oldest in db.imm.
++func heldMemTable(t *testing.T, db *DB) *memTable {
++	t.Helper()
++	db.lock.RLock()
++	defer db.lock.RUnlock()
++	require.NotEmpty(t, db.imm, "no memtable waits for its flush")
++	return db.imm[0]
++}
++
++// TestAFlushedLogIsGoneBeforeItsTableIsVisible holds a flush where its table
++// is named in the MANIFEST and not yet in level 0 (the level-0 stall, nothing
++// compacts), with a reader holding the memtable. The memtable's log must be
++// gone from the directory by then: once the table is in a level a compaction
++// can drop a delete marker of it, and a log left on disk, replayed after a
++// crash, brings back the set that marker shadowed (BUG-0858). The log goes
++// whatever references the memtable has; the reader keeps reading the
++// skiplist.
++func TestAFlushedLogIsGoneBeforeItsTableIsVisible(t *testing.T) {
++	for _, open := range retireOpens {
++		t.Run(open.name, func(t *testing.T) {
++			opt := open.tune(cutTestOptions(t.TempDir()))
++			db, err := Open(opt)
++			require.NoError(t, err)
++			closeAtCleanup(t, db)
++			holdTheFlusher(t, db)
++			held := heldMemTable(t, db)
++			reader := db.NewTransaction(false)
++			pin := reader.NewIterator(DefaultIteratorOptions)
++			t.Cleanup(func() {
++				pin.Close()
++				reader.Discard()
++			})
++
++			// The flush unlinks the log right after its MANIFEST change, so a
++			// look in between can still see it; it must be gone within moments,
++			// while the table still waits for level 0.
++			table := waitForANamedTableOutOfTheLevels(t, db)
++			var statErr error
++			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
++				if _, statErr = os.Stat(held.wal.path); statErr != nil {
++					break
++				}
++			}
++			require.ErrorIs(t, statErr, os.ErrNotExist, "the MANIFEST names table %d, which waits for level 0, and the log %s "+
++				"of the memtable it was flushed from is still on disk 5 s later", table, filepath.Base(held.wal.path))
++			require.Equal(t, []uint64{table}, namedButNotVisible(db), "the table went into a level while the test watched")
++
++			pin.Rewind()
++			require.True(t, pin.Valid(), "the reader that holds the flushed memtable reads nothing")
++		})
++	}
++}
++
++// TestALogLeftBesideItsNamedTableIsNotReplayed builds the image of a crash
++// between the MANIFEST change that names a flush's table and the durable
++// removal of its memtable's log: the table named and in no level, the log on
++// disk, at its bytes as of the last sync (a power cut) or whole (a kill). The
++// reopened store must not replay that log: its entries are all in the named
++// table, and replayed (under the cut, without the delete above the vouched
++// version) and flushed again it makes a second table that can outlive a
++// compaction of the first, bringing back the set that compaction dropped with
++// its delete marker.
++func TestALogLeftBesideItsNamedTableIsNotReplayed(t *testing.T) {
++	for _, open := range retireOpens {
++		for _, whole := range []bool{false, true} {
++			name := open.name + "/log as of the sync"
++			if whole {
++				name = open.name + "/log whole"
++			}
++			t.Run(name, func(t *testing.T) {
++				dir := t.TempDir()
++				opt := open.tune(cutTestOptions(dir))
++				db, err := Open(opt)
++				require.NoError(t, err)
++				closeAtCleanup(t, db)
++				fillLevelZeroToStall(t, db)
++
++				leftover := activeMemTable(db)
++				setKey(t, db, "doomed")
++				vouched, err := db.SyncVouched()
++				require.NoError(t, err)
++				logAtSync, err := os.ReadFile(leftover.wal.path)
++				require.NoError(t, err)
++				require.NoError(t, db.Update(func(txn *Txn) error { return txn.Delete([]byte("doomed")) }))
++				// The log's bytes after the last commit it takes are all it will
++				// ever hold: a rotated memtable is never written again.
++				var logWhole []byte
++				for batch := 0; activeMemTable(db) == leftover; batch++ {
++					require.Less(t, batch, 1000, "the memtable never rotated")
++					logWhole, err = os.ReadFile(leftover.wal.path)
++					require.NoError(t, err)
++					require.NoError(t, commitBatch(db, fmt.Sprintf("rotate-%04d", batch)))
++				}
++				waitForANamedTableOutOfTheLevels(t, db)
++				// The flush removes the log right after naming the table; copying the
++				// directory meanwhile could list the log and then not find it. The
++				// image gets the log back from the bytes read above either way.
++				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
++					if _, statErr := os.Stat(leftover.wal.path); statErr != nil {
++						break
++					}
++				}
++
++				leftLog := logAtSync
++				if whole {
++					leftLog = logWhole
++				}
++				image := writeImage(t, imageAt(t, dir), storeImage{filepath.Base(leftover.wal.path): leftLog})
++				reopenOpt := opt.WithDir(image).WithValueDir(image)
++				if opt.vouchedCut {
++					reopenOpt = reopenOpt.WithVouchedCut(vouched)
++				}
++				reopened, err := Open(reopenOpt)
++				require.NoError(t, err)
++				defer func() { require.NoError(t, reopened.Close()) }()
++				// The image's active log is replayed too, legitimately, on the legacy
++				// open (the cut empties it on the vouched one); only the leftover
++				// must not be.
++				leftoverName := filepath.Base(leftover.wal.path)
++				reopened.lock.RLock()
++				var replayed []string
++				for _, mt := range reopened.imm {
++					replayed = append(replayed, filepath.Base(mt.wal.path))
++				}
++				reopened.lock.RUnlock()
++				require.NotContains(t, replayed, leftoverName, "the reopened store replayed the log %s, whose table the MANIFEST "+
++					"already names, into a memtable it will flush into a second table", leftoverName)
++				_, statErr := os.Stat(filepath.Join(image, leftoverName))
++				require.ErrorIs(t, statErr, os.ErrNotExist, "the log %s, whose table the MANIFEST names, is still on disk after the open", leftoverName)
++				require.False(t, hasKey(t, reopened, "doomed"), "the deleted key is back after the reopen")
++			})
++		}
++	}
++}
++
++// setRetireSeams replaces retireRemoveLog and retireSyncDir for the test.
++func setRetireSeams(t *testing.T, remove func(string) error, syncDirectory func(string) error) {
++	t.Helper()
++	previousRemove, previousSync := retireRemoveLog, retireSyncDir
++	if remove != nil {
++		retireRemoveLog = remove
++	}
++	if syncDirectory != nil {
++		retireSyncDir = syncDirectory
++	}
++	t.Cleanup(func() { retireRemoveLog, retireSyncDir = previousRemove, previousSync })
++}
++
++// setOpenCompactionsHook replaces openCompactionsHook for the test.
++func setOpenCompactionsHook(t *testing.T, hook func(dir string)) {
++	t.Helper()
++	previous := openCompactionsHook
++	openCompactionsHook = hook
++	t.Cleanup(func() { openCompactionsHook = previous })
++}
++
++// holdFlushesOf holds the flusher of the store at dir in front of each flush
++// until the returned function is called (SetFlushTestHook).
++func holdFlushesOf(t *testing.T, dir string) (letGo func()) {
++	t.Helper()
++	release := make(chan struct{})
++	restore := SetFlushTestHook(func(db *DB) {
++		if filepath.Clean(db.Opts().Dir) == filepath.Clean(dir) {
++			<-release
++		}
++	})
++	var once bool
++	letGo = func() {
++		if !once {
++			once = true
++			close(release)
++		}
++	}
++	t.Cleanup(func() {
++		letGo()
++		restore()
++	})
++	return letGo
++}
++
++func waitUntilNoImmutables(t *testing.T, db *DB) {
++	t.Helper()
++	deadline := time.Now().Add(30 * time.Second)
++	for numImmutables(db) > 0 {
++		require.True(t, time.Now().Before(deadline), "the memtables were not flushed within 30 s")
++		time.Sleep(5 * time.Millisecond)
++	}
++}
++
++// TestTheRemovalIsDurableBeforeTheTableIsInALevel records the retirement's
++// steps through its seams: the log is unlinked after the MANIFEST names the
++// table, the directory is fsynced after the unlink, and the table is in no
++// level until both are done.
++func TestTheRemovalIsDurableBeforeTheTableIsInALevel(t *testing.T) {
++	for _, open := range retireOpens {
++		t.Run(open.name, func(t *testing.T) {
++			dir := t.TempDir()
++			db, err := Open(open.tune(cutTestOptions(dir)))
++			require.NoError(t, err)
++			closeAtCleanup(t, db)
++			first := activeMemTable(db)
++			var steps []string
++			setRetireSeams(t,
++				func(path string) error {
++					steps = append(steps, fmt.Sprintf("unlink %s: tables named and in no level %d", filepath.Base(path), len(namedButNotVisible(db))))
++					return os.Remove(path)
++				},
++				func(directory string) error {
++					_, statErr := os.Stat(first.wal.path)
++					steps = append(steps, fmt.Sprintf("directory fsync: log gone %v, tables named and in no level %d",
++						errors.Is(statErr, os.ErrNotExist), len(namedButNotVisible(db))))
++					return syncDir(directory)
++				})
++			require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++			waitUntilNoImmutables(t, db)
++			require.Empty(t, namedButNotVisible(db), "the flushed table is not in level 0 after its flush")
++			require.GreaterOrEqual(t, len(steps), 2, "the flush did not retire its log: steps %v", steps)
++			require.Equal(t, []string{
++				"unlink 00001.mem: tables named and in no level 1",
++				"directory fsync: log gone true, tables named and in no level 1",
++			}, steps[:2], "the retirement's steps out of order: the log must be unlinked after the MANIFEST names the table, "+
++				"the directory fsynced after the unlink, and the table kept out of level 0 until both are done")
++		})
++	}
++}
++
++// TestACrashInsideTheRemovalLeavesTheKeyDeleted takes the image inside the
++// retirement of the first memtable's log: before the unlink (the log whole
++// beside its named table), and before the directory fsync (the unlink not
++// durable, so the log can be back). The reopened store removes that log
++// instead of replaying it; then, with the reopened flusher held, a compaction
++// of the named table drops the delete marker and the set, and the key must
++// stay deleted once the flusher runs again: a replayed log would have been
++// flushed into a table holding the set alone.
++func TestACrashInsideTheRemovalLeavesTheKeyDeleted(t *testing.T) {
++	for _, open := range retireOpens {
++		for _, stop := range []string{"before the unlink", "before the directory fsync"} {
++			t.Run(open.name+"/"+stop, func(t *testing.T) {
++				dir := t.TempDir()
++				opt := open.tune(cutTestOptions(dir))
++				db, err := Open(opt)
++				require.NoError(t, err)
++				closeAtCleanup(t, db)
++				first := activeMemTable(db)
++				setKey(t, db, "doomed")
++				vouched, err := db.SyncVouched()
++				require.NoError(t, err)
++				require.NoError(t, db.Update(func(txn *Txn) error { return txn.Delete([]byte("doomed")) }))
++
++				var image storeImage
++				var logBytes []byte
++				setRetireSeams(t,
++					func(path string) error {
++						if path == first.wal.path && image == nil {
++							var readErr error
++							logBytes, readErr = os.ReadFile(path)
++							if readErr != nil {
++								return readErr
++							}
++							if stop == "before the unlink" {
++								image = imageAt(t, dir)
++							}
++						}
++						return os.Remove(path)
++					},
++					func(directory string) error {
++						if stop == "before the directory fsync" && image == nil && logBytes != nil {
++							image = imageAt(t, dir)
++							image[filepath.Base(first.wal.path)] = logBytes
++						}
++						return syncDir(directory)
++					})
++				require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++				waitUntilNoImmutables(t, db)
++				require.NotNil(t, image, "SCENARIO NOT REACHED: the first log's retirement never ran")
++				require.Contains(t, image, filepath.Base(first.wal.path), "the image holds no first log")
++
++				imageDir := writeImage(t, image)
++				reopenOpt := opt.WithDir(imageDir).WithValueDir(imageDir).WithNumLevelZeroTables(5).WithNumLevelZeroTablesStall(15)
++				if opt.vouchedCut {
++					reopenOpt = reopenOpt.WithVouchedCut(vouched)
++				}
++				letGo := holdFlushesOf(t, imageDir)
++				reopened, err := Open(reopenOpt)
++				require.NoError(t, err)
++				defer func() { require.NoError(t, reopened.Close()) }()
++				defer letGo() // runs before the Close above: a held flusher would keep Close waiting
++				require.False(t, hasKey(t, reopened, "doomed"), "the deleted key is back right after the reopen")
++				require.NoError(t, reopened.Flatten(1))
++				letGo()
++				waitUntilNoImmutables(t, reopened)
++				require.False(t, hasKey(t, reopened, "doomed"), "the deleted key is back after a compaction of its table "+
++					"and the flush of what the reopen replayed")
++				require.Equal(t, 1, reopened.VouchedCutReport().LogsOfNamedTables,
++					"the open did not remove the log whose table the MANIFEST names")
++			})
++		}
++	}
++}
++
++// TestAFailedDirectoryFsyncNamesNoSecondTable fails every directory fsync
++// after a flushed log's removal. The MANIFEST names the table once; the table
++// stays out of level 0 (the removal is not known to be durable), the memtable
++// keeps serving reads, writes are refused after the flush loop's failures,
++// Close returns and keeps the table, and the next open removes nothing it
++// needs and names no second table.
++func TestAFailedDirectoryFsyncNamesNoSecondTable(t *testing.T) {
++	for _, open := range retireOpens {
++		t.Run(open.name, func(t *testing.T) {
++			dir := t.TempDir()
++			opt := open.tune(cutTestOptions(dir))
++			db, err := Open(opt)
++			require.NoError(t, err)
++			first := activeMemTable(db)
++			setKey(t, db, "kept")
++			namedBefore := namedTableCount(db)
++			injected := errors.New("injected directory fsync failure")
++			setRetireSeams(t, nil, func(string) error { return injected })
++			require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++
++			deadline := time.Now().Add(30 * time.Second)
++			for db.WriteRefusal() == nil {
++				require.True(t, time.Now().Before(deadline), "writes were not refused within 30 s of a failing removal")
++				time.Sleep(20 * time.Millisecond)
++			}
++			require.ErrorIs(t, db.WriteRefusal(), ErrWritesRefused)
++			require.ErrorIs(t, db.WriteRefusal(), injected)
++			require.Equal(t, namedBefore+1, namedTableCount(db), "the retries named another table")
++			require.Len(t, namedButNotVisible(db), 1, "the table is in a level although its log's removal is not durable")
++			require.True(t, hasKey(t, db, "kept"), "the memtable of the named table no longer serves reads")
++			closeErr := db.Close()
++			require.Error(t, closeErr, "Close reported nothing about the memtable it could not flush")
++
++			setRetireSeams(t, os.Remove, syncDir)
++			reopened, err := Open(opt)
++			require.NoError(t, err)
++			defer func() { require.NoError(t, reopened.Close()) }()
++			require.True(t, hasKey(t, reopened, "kept"), "the key of the named table is gone after the reopen")
++			require.Equal(t, namedBefore+1, namedTableCount(reopened), "the reopen named a second table")
++			_, statErr := os.Stat(first.wal.path)
++			require.ErrorIs(t, statErr, os.ErrNotExist, "the log of the named table is still on disk after the reopen")
++		})
++	}
++}
++
++// TestAFailedUnlinkIsRetriedWithoutASecondTable fails the first two unlinks
++// of a flushed log. The retry removes the log and inserts the table it
++// already named; it never builds a second one.
++func TestAFailedUnlinkIsRetriedWithoutASecondTable(t *testing.T) {
++	for _, open := range retireOpens {
++		t.Run(open.name, func(t *testing.T) {
++			db, err := Open(open.tune(cutTestOptions(t.TempDir())))
++			require.NoError(t, err)
++			closeAtCleanup(t, db)
++			first := activeMemTable(db)
++			namedBefore := namedTableCount(db)
++			failures := 0
++			setRetireSeams(t, func(path string) error {
++				if failures < 2 {
++					failures++
++					return errors.New("injected unlink failure")
++				}
++				return os.Remove(path)
++			}, nil)
++			require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++			waitUntilNoImmutables(t, db)
++			require.Equal(t, 2, failures)
++			require.Equal(t, namedBefore+1, namedTableCount(db), "the retries named another table")
++			require.Empty(t, namedButNotVisible(db), "the named table is not in level 0 after the retry")
++			_, statErr := os.Stat(first.wal.path)
++			require.ErrorIs(t, statErr, os.ErrNotExist)
++			require.NoError(t, db.WriteRefusal())
++		})
++	}
++}
++
++// TestAFailedDirectoryFsyncIsNotRetriedIntoSuccess fails only the first
++// directory fsync after a flushed log's removal. A later fsync can succeed
++// without the unlink having reached the disk, so the failure stands for the
++// rest of the process: the table stays out of level 0 and writes are refused,
++// though every later fsync would succeed.
++func TestAFailedDirectoryFsyncIsNotRetriedIntoSuccess(t *testing.T) {
++	for _, open := range retireOpens {
++		t.Run(open.name, func(t *testing.T) {
++			db, err := Open(open.tune(cutTestOptions(t.TempDir())))
++			require.NoError(t, err)
++			first := activeMemTable(db)
++			failed := false
++			setRetireSeams(t, nil, func(directory string) error {
++				if !failed {
++					failed = true
++					return errors.New("injected directory fsync failure")
++				}
++				return syncDir(directory)
++			})
++			require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++			deadline := time.Now().Add(30 * time.Second)
++			for db.WriteRefusal() == nil {
++				require.True(t, time.Now().Before(deadline), "writes were not refused within 30 s: a retry took a later "+
++					"fsync's success for the durable removal of the log (table in no level: %v)", namedButNotVisible(db))
++				time.Sleep(20 * time.Millisecond)
++			}
++			require.Len(t, namedButNotVisible(db), 1, "the table went into level 0 after a failed directory fsync")
++			require.Error(t, db.Close())
++		})
++	}
++}
++
++// dropPrefixTestOptions are a store opened without the cut (the cut refuses
++// DB.DropPrefix), small memtables, as the legacy store's DropPrefixes uses.
++//
++// The value log is small too: an image copies every file whole, and the
++// default value-log file is preallocated far larger (an 8 GB VM ran out of
++// memory copying it under -race).
++func dropPrefixTestOptions(dir string) Options {
++	return getTestOptions(dir).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10).WithValueLogFileSize(1 << 20)
++}
++
++// writeAfterFailedDrop commits keys one at a time until a write is refused or
++// count are written, and returns the acknowledged keys.
++func writeAfterFailedDrop(t *testing.T, db *DB, count int) []string {
++	t.Helper()
++	var acked []string
++	for i := range count {
++		key := fmt.Sprintf("after-%03d", i)
++		if err := db.Update(func(txn *Txn) error { return txn.Set([]byte(key), []byte("v")) }); err != nil {
++			t.Logf("write %d refused: %v", i, err)
++			break
++		}
++		acked = append(acked, key)
++	}
++	return acked
++}
++
++// TestAFailedRemovalInsideDropPrefixLosesNoAcknowledgedWrite fails the
++// retirement inside DB.DropPrefix's own flush of the active memtable (review
++// F1 of BUG-0858's fix). DropPrefix returns the error and writes resume. Every
++// write acknowledged after it must survive: before the fix the failed memtable
++// stayed the active one, its table already named (built before the failure)
++// and, after a failed directory fsync, its log already unlinked, so the
++// writes went where no table and no log kept them.
++func TestAFailedRemovalInsideDropPrefixLosesNoAcknowledgedWrite(t *testing.T) {
++	t.Run("the directory fsync fails once", func(t *testing.T) {
++		dir := t.TempDir()
++		opt := dropPrefixTestOptions(dir)
++		db, err := Open(opt)
++		require.NoError(t, err)
++		setKey(t, db, "keep-1")
++		setKey(t, db, "drop-1")
++		failed := false
++		setRetireSeams(t, nil, func(directory string) error {
++			if !failed {
++				failed = true
++				return errors.New("injected directory fsync failure")
++			}
++			return syncDir(directory)
++		})
++		require.Error(t, db.DropPrefix([]byte("drop-")), "SCENARIO NOT REACHED: the drop's flush did not fail")
++		acked := writeAfterFailedDrop(t, db, 20)
++		require.NotEmpty(t, acked, "SCENARIO NOT REACHED: no write was acknowledged after the failed drop")
++		require.NoError(t, db.Sync(), "a sync after the acknowledged writes")
++		closeErr := db.Close()
++		t.Logf("Close: %v", closeErr)
++
++		reopened, err := Open(opt)
++		require.NoError(t, err)
++		defer func() { require.NoError(t, reopened.Close()) }()
++		var lost []string
++		for _, key := range acked {
++			if !hasKey(t, reopened, key) {
++				lost = append(lost, key)
++			}
++		}
++		require.Empty(t, lost, "%d of %d writes acknowledged after the failed DropPrefix (and synced) are gone after "+
++			"Close and a reopen", len(lost), len(acked))
++		require.True(t, hasKey(t, reopened, "keep-1"), "a key committed before the failed drop is gone")
++	})
++
++	t.Run("the unlink fails twice", func(t *testing.T) {
++		dir := t.TempDir()
++		opt := dropPrefixTestOptions(dir)
++		db, err := Open(opt)
++		require.NoError(t, err)
++		setKey(t, db, "keep-1")
++		setKey(t, db, "drop-1")
++		first := activeMemTable(db)
++		failures := 0
++		setRetireSeams(t, func(path string) error {
++			if failures < 2 {
++				failures++
++				return errors.New("injected unlink failure")
++			}
++			return os.Remove(path)
++		}, nil)
++		require.Error(t, db.DropPrefix([]byte("drop-")), "SCENARIO NOT REACHED: the drop's flush did not fail")
++		acked := writeAfterFailedDrop(t, db, 5)
++		require.Len(t, acked, 5, "a write was refused after the failed drop")
++		// The restarted flusher retries the removal and succeeds; a crash right
++		// after leaves this image.
++		deadline := time.Now().Add(20 * time.Second)
++		for {
++			if _, statErr := os.Stat(first.wal.path); errors.Is(statErr, os.ErrNotExist) {
++				break
++			}
++			require.True(t, time.Now().Before(deadline), "SCENARIO NOT REACHED: the retry never removed the log")
++			time.Sleep(20 * time.Millisecond)
++		}
++		waitUntilNoImmutables(t, db)
++		imageDir := writeImage(t, imageAt(t, dir))
++		reopened, err := Open(opt.WithDir(imageDir).WithValueDir(imageDir))
++		require.NoError(t, err)
++		defer func() { require.NoError(t, reopened.Close()) }()
++		var lost []string
++		for _, key := range acked {
++			if !hasKey(t, reopened, key) {
++				lost = append(lost, key)
++			}
++		}
++		require.Empty(t, lost, "%d of %d writes acknowledged after the failed DropPrefix and before the flusher's "+
++			"retry are not in the image taken after it", len(lost), len(acked))
++		require.True(t, hasKey(t, reopened, "keep-1"), "a key committed before the failed drop is gone")
++		require.NoError(t, db.Close())
++	})
++}
++
++// TestTheOpenSyncsTheDirectoryBeforeCompactionsStart checks, through the
++// retirement's seams, that every open fsyncs the store directory before it
++// returns (and so before compactions start): after removing a leftover log of
++// a named table (review F2: no test failed with that fsync removed), and when
++// it removed nothing, because an unlink an earlier process applied (a flush
++// whose directory fsync failed; an open that failed after its own unlink) can
++// be in the page cache only, and a power cut after compactions have read the
++// table would bring the log back.
++func TestTheOpenSyncsTheDirectoryBeforeCompactionsStart(t *testing.T) {
++	for _, open := range retireOpens {
++		t.Run(open.name+"/nothing to remove", func(t *testing.T) {
++			dir := t.TempDir()
++			opt := open.tune(cutTestOptions(dir))
++			db, err := Open(opt)
++			require.NoError(t, err)
++			setKey(t, db, "kept")
++			require.NoError(t, db.Close())
++			var steps []string
++			setRetireSeams(t,
++				func(path string) error { steps = append(steps, "unlink "+filepath.Base(path)); return os.Remove(path) },
++				func(directory string) error { steps = append(steps, "directory fsync"); return syncDir(directory) })
++			setOpenCompactionsHook(t, func(string) { steps = append(steps, "compactions start") })
++			reopened, err := Open(opt)
++			require.NoError(t, err)
++			opened := append([]string(nil), steps...)
++			require.NoError(t, reopened.Close())
++			// The order is the point (review R3): a directory fsync after the
++			// compactions start would let one read a table whose log a power
++			// cut can bring back.
++			require.Equal(t, []string{"directory fsync", "compactions start"}, opened, "an open that removed no log did "+
++				"not fsync the directory before it started the compactions")
++		})
++		t.Run(open.name+"/a leftover log", func(t *testing.T) {
++			dir := t.TempDir()
++			opt := open.tune(cutTestOptions(dir))
++			db, err := Open(opt)
++			require.NoError(t, err)
++			closeAtCleanup(t, db)
++			first := activeMemTable(db)
++			setKey(t, db, "kept")
++			vouched, err := db.SyncVouched()
++			require.NoError(t, err)
++			var image storeImage
++			setRetireSeams(t, func(path string) error {
++				if path == first.wal.path && image == nil {
++					image = imageAt(t, dir)
++				}
++				return os.Remove(path)
++			}, nil)
++			require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++			waitUntilNoImmutables(t, db)
++			// Closed before the seams change: its flusher could retire another
++			// memtable through them meanwhile (a data race under -race).
++			require.NoError(t, db.Close())
++			require.NotNil(t, image, "SCENARIO NOT REACHED: the first log's retirement never ran")
++			imageDir := writeImage(t, image)
++			reopenOpt := opt.WithDir(imageDir).WithValueDir(imageDir)
++			if opt.vouchedCut {
++				reopenOpt = reopenOpt.WithVouchedCut(vouched)
++			}
++			var steps []string
++			setRetireSeams(t,
++				func(path string) error {
++					if filepath.Dir(path) == imageDir {
++						steps = append(steps, "unlink "+filepath.Base(path))
++					}
++					return os.Remove(path)
++				},
++				func(directory string) error {
++					if directory == imageDir {
++						steps = append(steps, "directory fsync")
++					}
++					return syncDir(directory)
++				})
++			setOpenCompactionsHook(t, func(directory string) {
++				if directory == imageDir {
++					steps = append(steps, "compactions start")
++				}
++			})
++			// Held so that the flush of a replayed log (the legacy open replays the
++			// image's active log) cannot add steps meanwhile.
++			letGo := holdFlushesOf(t, imageDir)
++			reopened, err := Open(reopenOpt)
++			require.NoError(t, err)
++			opened := append([]string(nil), steps...)
++			defer func() { require.NoError(t, reopened.Close()) }()
++			defer letGo() // runs before the Close above
++			require.Equal(t, []string{"unlink " + filepath.Base(first.wal.path), "directory fsync", "compactions start"}, opened,
++				"the open did not fsync the directory after removing the log whose table the MANIFEST names, before it started the compactions")
++			require.True(t, hasKey(t, reopened, "kept"))
++		})
++	}
++}
++
++// TestAFailedOpenStepReturnsNoStoreAndItsCause fails the open step's unlink,
++// then its directory fsync, on an image holding a log beside its named table
++// (review F7 and F2). Open must return no DB and an error errors.Is matches to
++// the cause; the next open, which may no longer see the log, must still fsync
++// the directory before it returns.
++func TestAFailedOpenStepReturnsNoStoreAndItsCause(t *testing.T) {
++	for _, open := range retireOpens {
++		for _, failing := range []string{"unlink", "directory fsync"} {
++			t.Run(open.name+"/"+failing, func(t *testing.T) {
++				dir := t.TempDir()
++				opt := open.tune(cutTestOptions(dir))
++				db, err := Open(opt)
++				require.NoError(t, err)
++				closeAtCleanup(t, db)
++				first := activeMemTable(db)
++				setKey(t, db, "doomed")
++				vouched, err := db.SyncVouched()
++				require.NoError(t, err)
++				require.NoError(t, db.Update(func(txn *Txn) error { return txn.Delete([]byte("doomed")) }))
++				var image storeImage
++				setRetireSeams(t, func(path string) error {
++					if path == first.wal.path && image == nil {
++						image = imageAt(t, dir)
++					}
++					return os.Remove(path)
++				}, nil)
++				require.NoError(t, commitUntilRotatedFrom(db, first, "rotate"))
++				waitUntilNoImmutables(t, db)
++				// Closed before the seams change (see TestTheOpenSyncsTheDirectoryBeforeCompactionsStart).
++				require.NoError(t, db.Close())
++				require.NotNil(t, image, "SCENARIO NOT REACHED: the first log's retirement never ran")
++				imageDir := writeImage(t, image)
++				reopenOpt := opt.WithDir(imageDir).WithValueDir(imageDir)
++				if opt.vouchedCut {
++					reopenOpt = reopenOpt.WithVouchedCut(vouched)
++				}
++
++				injected := errors.New("injected open-step failure")
++				if failing == "unlink" {
++					setRetireSeams(t, func(string) error { return injected }, syncDir)
++				} else {
++					setRetireSeams(t, os.Remove, func(string) error { return injected })
++				}
++				failed, err := Open(reopenOpt)
++				require.ErrorIs(t, err, injected, "the open's error does not carry its cause")
++				require.Nil(t, failed, "a failed open returned a DB")
++
++				syncs := 0
++				setRetireSeams(t, os.Remove, func(directory string) error {
++					if directory == imageDir {
++						syncs++
++					}
++					return syncDir(directory)
++				})
++				// Held so that the flush of a replayed log (the legacy open replays
++				// the image's active log) cannot fsync the directory meanwhile.
++				letGo := holdFlushesOf(t, imageDir)
++				reopened, err := Open(reopenOpt)
++				require.NoError(t, err, "the open after the failed one")
++				opened := syncs
++				defer func() { require.NoError(t, reopened.Close()) }()
++				defer letGo() // runs before the Close above
++				require.Equal(t, 1, opened, "the open after a failed open step did not fsync the directory before it returned")
++				require.False(t, hasKey(t, reopened, "doomed"), "the deleted key is back")
++			})
++		}
++	}
++}
+diff --git a/levels.go b/levels.go
+index 1039cfc..2710a42 100644
+--- a/levels.go
++++ b/levels.go
+@@ -13,6 +13,11 @@
+  * Modified by the hoardDB project, 2026-10-19: a write that would wait for room
+  * behind a level 0 held at its stall limit by a damaged table is refused,
+  * naming the table. See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-11-18: addLevel0Table is split into
++ * nameLevel0Table (the MANIFEST change) and insertLevel0Table (level 0), so
++ * that a flush removes its log durably between the two. See
++ * hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -1676,6 +1681,18 @@ func (s *levelsController) doCompact(id int, p compactionPriority) error {
+ }
+ 
+ func (s *levelsController) addLevel0Table(t *table.Table) error {
++	if err := s.nameLevel0Table(t); err != nil {
++		return err
++	}
++	s.insertLevel0Table(t)
++	return nil
++}
++
++// nameLevel0Table records a flushed table in the MANIFEST, synced, as a
++// level-0 table. The table is in no level yet, so no compaction can pick it.
++// hoardDB: split out of addLevel0Table so that a flush makes its log's
++// removal durable between the two steps (DB.handleMemTableFlush).
++func (s *levelsController) nameLevel0Table(t *table.Table) error {
+ 	// Add table to manifest file only if it is not opened in memory. We don't want to add a table
+ 	// to the manifest file if it exists only in memory.
+ 	if !t.IsInmemory {
+@@ -1690,7 +1707,12 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
+ 			return err
+ 		}
+ 	}
++	return nil
++}
+ 
++// insertLevel0Table adds a table nameLevel0Table recorded to level 0, where a
++// compaction can pick it, after waiting while level 0 is at its stall.
++func (s *levelsController) insertLevel0Table(t *table.Table) {
+ 	// Wait (without busy-polling) until L0 is below the stall threshold, then add
+ 	// the table. We hold the L0 write lock, which is also the l0stall cond's
+ 	// Locker, so the predicate check and the transition into cond.Wait are atomic
+@@ -1729,8 +1751,6 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
+ 	}
+ 	l0.addLevel0TableLocked(t)
+ 	l0.Unlock()
+-
+-	return nil
+ }
+ 
+ // stalledByUnreadableTable returns the error Close reports when it had to add a
+diff --git a/memtable.go b/memtable.go
+index ce4c2aa..cf43f07 100644
+--- a/memtable.go
++++ b/memtable.go
+@@ -10,6 +10,22 @@
+  * so an msync writes back pages rather than readahead-sized folios;
+  * memTable.UpdateSkipList keeps readahead while it replays. See
+  * hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-11-17: under a vouched cut
++ * (WithVouchedCut) the replay at open leaves out every entry above the
++ * vouched version, truncates each log there and makes the truncation and the
++ * removal of the logs it empties durable before Open returns. See
++ * hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-11-18: a flushed memtable's log is
++ * removed at its flush (DB.retireMemTableLog) whatever references the
++ * memtable has; the last reference then releases the unlinked file
++ * (logFile.closeRetired). See hoardDB/third_party/README.md.
++ * Modified by the hoardDB project, 2026-11-19: a flush whose MANIFEST change
++ * fails keeps its table file and is not retried (memTable.failedNaming,
++ * hoardDB's BUG-0868). See hoardDB/third_party/README.md.
++ * Modified by the hoardDB project, 2026-11-19: DB.newMemTable counts the log
++ * it creates (DB.LogFilesCreated). See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -33,6 +49,7 @@ import (
+ 
+ 	"github.com/dgraph-io/badger/v4/pb"
+ 	"github.com/dgraph-io/badger/v4/skl"
++	"github.com/dgraph-io/badger/v4/table"
+ 	"github.com/dgraph-io/badger/v4/y"
+ 	"github.com/dgraph-io/ristretto/v2/z"
+ )
+@@ -47,6 +64,41 @@ type memTable struct {
+ 	maxVersion uint64
+ 	opt        Options
+ 	buf        *bytes.Buffer
++	// cut is set only while Open replays this log under a vouched cut
++	// (WithVouchedCut); nil otherwise. hoardDB.
++	cut *vouchedCutScan
++	// logRetired is set once the flush has removed the log's name
++	// (DB.retireMemTableLog); the last reference then releases the file
++	// without removing it again. hoardDB.
++	logRetired atomic.Bool
++	// named is the table the MANIFEST names for this memtable while the
++	// removal of its log is not yet durable: it holds the flush's reference
++	// and is in no level. A retry of the flush retires the log and inserts
++	// this table; it never builds a second one. retireFailed is set when the
++	// directory fsync after the removal failed: the removal is then not known
++	// to be durable for the rest of the process, and every retry returns it.
++	// Only the flusher touches either, and DropPrefix while the flusher is
++	// stopped. Neither is ever set on the active memtable: the flusher takes
++	// rotated memtables only, and DropPrefix rotates the active one out before
++	// it flushes it (review F1: flushed in place, a failed removal left the
++	// active memtable with a named table, and writes acknowledged into it
++	// were lost). hoardDB.
++	named        *table.Table
++	retireFailed error
++	// failedNaming is the table whose MANIFEST change failed: addChanges
++	// applies the change in memory and writes it before the sync, so when the
++	// sync fails the MANIFEST may name the table on disk, now or at its next
++	// rewrite. The file is kept (DecrRef would delete a table the MANIFEST may
++	// name) and the naming is not retried, as a failed directory fsync is not
++	// (a later sync can succeed without the record having reached the disk):
++	// nameFailed is returned by every later flush of this memtable, change 4
++	// refuses writes, the memtable's log stays, and Close closes the table and
++	// keeps it. Whatever the MANIFEST holds, the next Open then finds a store it
++	// can open: the named table and its log, which it removes; or an unnamed
++	// table, which it deletes (or, for a first flush, hoardDB's guard sets
++	// aside) and the log it replays. hoardDB's BUG-0868.
++	failedNaming *table.Table
++	nameFailed   error
+ }
+ 
+ func (db *DB) openMemTables(opt Options) error {
+@@ -76,21 +128,48 @@ func (db *DB) openMemTables(opt Options) error {
+ 	sort.Slice(fids, func(i, j int) bool {
+ 		return fids[i] < fids[j]
+ 	})
++	// hoardDB: under a vouched cut the logs are replayed oldest first, which is
++	// version order, so the first entry above the vouched version is the cut
++	// point and every later entry is above it too.
++	if db.opt.vouchedCut {
++		db.replayCut = &vouchedCutScan{version: db.opt.vouchedVersion}
++		defer func() { db.replayCut = nil }()
++	}
+ 	for _, fid := range fids {
+ 		flags := os.O_RDWR
+ 		if db.opt.ReadOnly {
+ 			flags = os.O_RDONLY
+ 		}
++		if db.replayCut != nil {
++			db.replayCut.startLog()
++		}
+ 		mt, err := db.openMemTable(fid, flags)
+ 		if err != nil {
+ 			return y.Wrapf(err, "while opening fid: %d", fid)
+ 		}
++		cutHere := db.replayCut != nil && db.replayCut.logCut
+ 		// If this memtable is empty we don't need to add it. This is a
+ 		// memtable that was completely truncated.
+ 		if mt.sl.Empty() {
++			walPath := mt.wal.path
+ 			mt.DecrRef()
++			if cutHere {
++				// The removal is what takes the discarded bytes off the disk,
++				// and DecrRef only logs a failure to remove.
++				if _, statErr := os.Stat(walPath); statErr == nil {
++					return fmt.Errorf("the memtable log %s, which the vouched cut emptied, could not be removed "+
++						"(the error is logged above)", walPath)
++				} else if !os.IsNotExist(statErr) {
++					return fmt.Errorf("checking that the memtable log %s, which the vouched cut emptied, was removed: %w",
++						walPath, statErr)
++				}
++				db.replayCut.logsRemoved++
++			}
+ 			continue
+ 		}
++		if cutHere {
++			db.replayCut.logsTruncated++
++		}
+ 		// These should no longer be written to. So, make them part of the imm.
+ 		db.imm = append(db.imm, mt)
+ 	}
+@@ -98,6 +177,17 @@ func (db *DB) openMemTables(opt Options) error {
+ 		db.nextMemFid = fids[len(fids)-1]
+ 	}
+ 	db.nextMemFid++
++	// hoardDB: the removals of the logs the cut emptied are durable before
++	// Open returns, as the truncations are (UpdateSkipList).
++	if cut := db.replayCut; cut != nil {
++		if cut.logsTruncated+cut.logsRemoved > 0 {
++			if err := cutSyncDir(db.opt.Dir); err != nil {
++				return y.Wrapf(err, "while syncing the directory %s after the vouched cut", db.opt.Dir)
++			}
++		}
++		db.vouchedReport.DiscardedTxns = cut.discardedTxns
++		db.vouchedReport.LogsTruncated, db.vouchedReport.LogsRemoved = cut.logsTruncated, cut.logsRemoved
++	}
+ 	return nil
+ }
+ 
+@@ -110,6 +200,7 @@ func (db *DB) openMemTable(fid, flags int) (*memTable, error) {
+ 		sl:  s,
+ 		opt: db.opt,
+ 		buf: &bytes.Buffer{},
++		cut: db.replayCut,
+ 	}
+ 	// We don't need to create the wal for the skiplist in in-memory mode so return the mt.
+ 	if db.opt.InMemory {
+@@ -131,6 +222,12 @@ func (db *DB) openMemTable(fid, flags int) (*memTable, error) {
+ 	// Have a callback set to delete WAL when skiplist reference count goes down to zero. That is,
+ 	// when it gets flushed to L0.
+ 	s.OnClose = func() {
++		if mt.logRetired.Load() {
++			if err := mt.wal.closeRetired(); err != nil {
++				db.opt.Errorf("while releasing the removed log: %s, err: %v", filepath, err)
++			}
++			return
++		}
+ 		if err := mt.wal.Delete(); err != nil {
+ 			db.opt.Errorf("while deleting file: %s, err: %v", filepath, err)
+ 		}
+@@ -140,6 +237,7 @@ func (db *DB) openMemTable(fid, flags int) (*memTable, error) {
+ 		return mt, lerr
+ 	}
+ 	err := mt.UpdateSkipList()
++	mt.cut = nil
+ 	return mt, y.Wrapf(err, "while updating skiplist")
+ }
+ 
+@@ -147,6 +245,7 @@ func (db *DB) newMemTable() (*memTable, error) {
+ 	mt, err := db.openMemTable(db.nextMemFid, os.O_CREATE|os.O_RDWR)
+ 	if err == z.NewFile {
+ 		db.nextMemFid++
++		db.logFilesCreated.Add(1) // hoardDB: before any commit is written to it.
+ 		return mt, nil
+ 	}
+ 
+@@ -224,7 +323,24 @@ func (mt *memTable) UpdateSkipList() error {
+ 	if endOff < mt.wal.size.Load() && mt.opt.ReadOnly {
+ 		return y.Wrapf(ErrTruncateNeeded, "end offset: %d < size: %d", endOff, mt.wal.size.Load())
+ 	}
+-	return mt.wal.Truncate(int64(endOff))
++	cut := mt.cut != nil && mt.cut.logCut
++	if cut {
++		endOff = min(endOff, mt.cut.logCutOffset)
++	}
++	if err := mt.wal.Truncate(int64(endOff)); err != nil {
++		return err
++	}
++	// hoardDB: the versions the cut discarded are handed out again, so the old
++	// bytes must be off the disk before the first commit: a later, higher
++	// vouched version would vouch them. Truncate msyncs before it truncates
++	// and does not fsync after. A log the cut emptied is removed instead, and
++	// openMemTables fsyncs the directory.
++	if cut && !mt.sl.Empty() {
++		if err := cutSyncFile(mt.wal.Fd); err != nil {
++			return y.Wrapf(err, "while syncing the memtable log %s after the vouched cut", mt.wal.path)
++		}
++	}
++	return nil
+ }
+ 
+ // IncrRef increases the refcount
+@@ -239,11 +355,19 @@ func (mt *memTable) DecrRef() {
+ 
+ func (mt *memTable) replayFunction(opt Options) func(Entry, valuePointer) error {
+ 	first := true
+-	return func(e Entry, _ valuePointer) error { // Function for replaying.
++	return func(e Entry, vp valuePointer) error { // Function for replaying.
+ 		if first {
+ 			opt.Debugf("First key=%q\n", e.Key)
+ 		}
+ 		first = false
++		// hoardDB: under a vouched cut an entry above the vouched version enters
++		// neither the skiplist nor maxVersion; UpdateSkipList then truncates the
++		// log where the first one starts.
++		if mt.cut != nil {
++			if discard, err := mt.cut.discards(e.Key, vp.Offset, mt.wal.path); discard || err != nil {
++				return err
++			}
++		}
+ 		if ts := y.ParseTs(e.Key); ts > mt.maxVersion {
+ 			mt.maxVersion = ts
+ 		}
+diff --git a/options.go b/options.go
+index c8f2124..0c6077a 100644
+--- a/options.go
++++ b/options.go
+@@ -9,6 +9,9 @@
+  * Modified by the hoardDB project, 2026-11-15: Options.BloomPrefixRules and
+  * WithBloomPrefixRules; buildTableOptions hands the rules and the DB's
+  * counters to every table builder. See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-11-17: WithVouchedCut opens the store
++ * with a vouched cut. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -129,6 +132,13 @@ type Options struct {
+ 	// Not recommended for most users.
+ 	managedTxns bool
+ 
++	// vouchedCut and vouchedVersion are set by WithVouchedCut (hoardDB). They
++	// are unexported so that FromSuperFlag and generateSuperFlag never carry
++	// them: a store is opened with a cut only by a caller that read the version
++	// from its own record.
++	vouchedCut     bool
++	vouchedVersion uint64
++
+ 	// 4. Flags for testing purposes
+ 	// ------------------------------
+ 	maxBatchCount int64 // max entries in batch
+@@ -594,6 +604,25 @@ func (opt Options) WithBloomPrefixRules(rules ...BloomPrefixRule) Options {
+ 	return opt
+ }
+ 
++// WithVouchedCut returns a new Options value that opens the store with a
++// vouched cut at version. hoardDB.
++//
++// version is the highest commit version a successful DB.SyncVouched returned
++// before the store was last closed or lost, as the caller recorded it. Open
++// then discards every memtable-log entry above it, truncates each log there
++// and makes the truncation durable before the first commit, and gives the
++// first commit a version above it; DB.VouchedCutReport says what was
++// discarded. What a flushed table holds is kept, so the store opens holding
++// exactly the commits up to the larger of version and the tables' highest
++// version. Under the option the calls that write out of version order are
++// refused (ErrVouchedCutRefused), and Open refuses it with ReadOnly, InMemory
++// or managed mode. Without it Badger behaves as upstream.
++func (opt Options) WithVouchedCut(version uint64) Options {
++	opt.vouchedCut = true
++	opt.vouchedVersion = version
++	return opt
++}
++
+ // WithBlockSize returns a new Options value with BlockSize set to the given value.
+ //
+ // BlockSize sets the size of any block in SSTable. SSTable is divided into multiple blocks
+diff --git a/stream_writer.go b/stream_writer.go
+index a3d563f..31e075e 100644
+--- a/stream_writer.go
++++ b/stream_writer.go
+@@ -1,6 +1,10 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-11-17: StreamWriter.Prepare and
++ * StreamWriter.PrepareIncremental are refused in a store opened with a
++ * vouched cut (WithVouchedCut). See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -59,6 +63,11 @@ func (db *DB) NewStreamWriter() *StreamWriter {
+ // calling Prepare, because it could result in permanent data loss. Not calling Prepare would result
+ // in a corrupt Badger instance. Use PrepareIncremental to do incremental stream write.
+ func (sw *StreamWriter) Prepare() error {
++	// hoardDB: NewStreamWriter returns no error, so the refusal under a vouched
++	// cut is here, before anything is dropped.
++	if err := sw.db.refuseUnderVouchedCut("StreamWriter.Prepare"); err != nil {
++		return err
++	}
+ 	sw.writeLock.Lock()
+ 	defer sw.writeLock.Unlock()
+ 
+@@ -72,6 +81,9 @@ func (sw *StreamWriter) Prepare() error {
+ // PrepareIncremental should be called before writing any entry to StreamWriter incrementally.
+ // In incremental stream write, the tables are written at one level above the current base level.
+ func (sw *StreamWriter) PrepareIncremental() error {
++	if err := sw.db.refuseUnderVouchedCut("StreamWriter.PrepareIncremental"); err != nil {
++		return err
++	}
+ 	sw.writeLock.Lock()
+ 	defer sw.writeLock.Unlock()
+ 
+diff --git a/value.go b/value.go
+index e042651..a23497c 100644
+--- a/value.go
++++ b/value.go
+@@ -1,6 +1,9 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-11-19: valueLog.createVlogFile counts
++ * the file it creates (DB.LogFilesCreated). See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -537,6 +540,7 @@ func (vlog *valueLog) createVlogFile() (*logFile, error) {
+ 	if err != z.NewFile && err != nil {
+ 		return nil, err
+ 	}
++	vlog.db.logFilesCreated.Add(1) // hoardDB: before any value is written to it.
+ 
+ 	vlog.filesLock.Lock()
+ 	vlog.filesMap[fid] = lf
+diff --git a/vouched.go b/vouched.go
+new file mode 100644
+index 0000000..f5344fe
+--- /dev/null
++++ b/vouched.go
+@@ -0,0 +1,185 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-17: the vouched cut (WithVouchedCut,
++ * DB.SyncVouched, DB.VouchedCutReport, ErrVouchedCutRefused) and its test
++ * seams. See hoardDB/third_party/README.md.
++ */
++
++package badger
++
++import (
++	"errors"
++	"fmt"
++	"os"
++
++	"github.com/dgraph-io/badger/v4/y"
++)
++
++// VouchedCutReport says what the vouched cut did at Open. hoardDB.
++type VouchedCutReport struct {
++	Vouched       uint64 // the version the store was opened with (WithVouchedCut)
++	Kept          uint64 // the highest version kept: the larger of Vouched and the tables' highest version
++	DiscardedTxns uint64 // commits above Vouched discarded from the memtable logs
++	LogsTruncated int    // memtable logs cut short and fsynced
++	LogsRemoved   int    // memtable logs the cut emptied, deleted
++	// LogsOfNamedTables counts the memtable logs Open removed, durably,
++	// because the MANIFEST already names their tables (a crash inside a
++	// flushed log's retirement; DB.removeLogsOfNamedTables). Set with or
++	// without WithVouchedCut.
++	LogsOfNamedTables int
++}
++
++// VouchedCutReport returns what the vouched cut did at Open; for a store
++// opened without WithVouchedCut, only LogsOfNamedTables is set. hoardDB.
++func (db *DB) VouchedCutReport() VouchedCutReport {
++	return db.vouchedReport
++}
++
++// ErrVouchedCutRefused is wrapped by the error a call gets when it would
++// write out of version order in a store opened with WithVouchedCut, and by
++// Open's refusal of the option with ReadOnly, InMemory or managed mode.
++// hoardDB.
++var ErrVouchedCutRefused = errors.New("refused under a vouched cut")
++
++// vouchedCutRefusal is the error of a call refused under a vouched cut. It
++// names the call and says why.
++type vouchedCutRefusal struct{ call string }
++
++func (r vouchedCutRefusal) Error() string {
++	return "this store was opened with a vouched cut (WithVouchedCut), which keeps commit versions in write order; " +
++		r.call + " would write out of that order, so it was refused"
++}
++
++func (r vouchedCutRefusal) Unwrap() error { return ErrVouchedCutRefused }
++
++// refuseUnderVouchedCut returns the refusal of call when the store was
++// opened with WithVouchedCut, and nil otherwise. The refused calls write
++// entries at versions they choose (DB.Load, the value-log GC's rewrite,
++// DB.BanNamespace at version 1) or drop data outside any commit
++// (DB.DropAll, DB.DropPrefix, the stream writer), so after them a version
++// no longer says which commits came before it, and the cut could drop
++// vouched data or keep a hole.
++func (db *DB) refuseUnderVouchedCut(call string) error {
++	if !db.opt.vouchedCut {
++		return nil
++	}
++	return vouchedCutRefusal{call: call}
++}
++
++// checkVouchedCutOptions refuses WithVouchedCut where the cut cannot hold:
++// a read-only open cannot truncate a log, an in-memory store has none, and
++// managed mode lets the caller choose commit versions, so version order is
++// no longer write order.
++func checkVouchedCutOptions(opt *Options) error {
++	if !opt.vouchedCut {
++		return nil
++	}
++	switch {
++	case opt.ReadOnly:
++		return fmt.Errorf("WithVouchedCut cannot be used with ReadOnly: the cut truncates the memtable logs at open, "+
++			"which a read-only open cannot do: %w", ErrVouchedCutRefused)
++	case opt.InMemory:
++		return fmt.Errorf("WithVouchedCut cannot be used with InMemory: an in-memory store has no memtable logs to cut: %w",
++			ErrVouchedCutRefused)
++	case opt.managedTxns:
++		return vouchedCutRefusal{call: "managed mode (OpenManaged)"}
++	}
++	return nil
++}
++
++// vouchedCutScan is the cut's state while Open replays the memtable logs,
++// oldest first (DB.openMemTables). hoardDB.
++type vouchedCutScan struct {
++	version uint64
++	// cutStarted is set once a log, this one or an earlier one, has handed
++	// over an entry above version. Versions are written in order, so from
++	// there on every entry must be above it.
++	cutStarted bool
++	// logCut and logCutOffset are the log being replayed: whether it holds an
++	// entry above version, and the offset of the first such entry, which is
++	// where its transaction starts (logFile.iterate hands a transaction over
++	// at its end marker, its first entry carrying the offset it starts at).
++	logCut       bool
++	logCutOffset uint32
++	// logsTruncated and logsRemoved count the logs the cut shortened and
++	// those it emptied; discardedTxns counts the commits it left out, one per
++	// version, lastDiscarded being the version of the last entry left out.
++	logsTruncated, logsRemoved   int
++	discardedTxns, lastDiscarded uint64
++}
++
++// startLog resets the state of the log being replayed.
++func (scan *vouchedCutScan) startLog() {
++	scan.logCut, scan.logCutOffset = false, 0
++}
++
++// discards reports whether the replay of the log at logPath must leave out
++// the entry at offset with the given key: every entry above the vouched
++// version is discarded. An entry at or below it after the cut point means
++// versions are out of write order (only the calls refused under the cut write
++// so), and cutting there would drop vouched data, so it fails the open.
++func (scan *vouchedCutScan) discards(key []byte, offset uint32, logPath string) (bool, error) {
++	version := y.ParseTs(key)
++	if version > scan.version {
++		if !scan.logCut {
++			scan.logCut, scan.logCutOffset, scan.cutStarted = true, offset, true
++		}
++		// A transaction's entries share its version and are handed over
++		// together, so a new version is a new commit.
++		if version != scan.lastDiscarded {
++			scan.discardedTxns, scan.lastDiscarded = scan.discardedTxns+1, version
++		}
++		return true, nil
++	}
++	if scan.cutStarted {
++		return false, fmt.Errorf("the memtable log %s holds version %d after the vouched cut point, where every "+
++			"version must be above the vouched version %d: commit versions are out of write order (a call that is "+
++			"refused under the cut wrote this store), and cutting here would drop vouched data", logPath, version, scan.version)
++	}
++	return false, nil
++}
++
++// cutSyncFile fsyncs a memtable log the cut truncated (T5 replaces it).
++var cutSyncFile = func(f *os.File) error { return f.Sync() }
++
++// cutSyncDir fsyncs the store directory after the cut (T5 replaces it).
++var cutSyncDir = syncDir
++
++// syncValueLogHook is set only by tests. DB.SyncVouched calls it after the
++// memtable logs' msyncs and before the value log's, so a test can hold a sync
++// where a power cut leaves a value-log pointer durable without its bytes.
++var syncValueLogHook func()
++
++// syncAfterUnlockHook is set only by tests. DB.SyncVouched calls it right
++// after it releases db.lock, once both captures are taken and before any
++// msync. Unlike syncCaptureHook, which runs under that lock, a commit can
++// return while it runs: every commit takes db.lock.Lock in
++// DB.ensureRoomForWrite.
++var syncAfterUnlockHook func()
++
++// SyncTestHooks are the test seams of DB.Sync and DB.SyncVouched; a nil
++// field is no hook. hoardDB.
++type SyncTestHooks struct {
++	// AfterCapture runs right after the sync has captured the memtables and
++	// released db.lock, before any msync. A commit started here can return,
++	// and the memtable can rotate, while the sync waits.
++	AfterCapture func()
++	// BeforeValueLogSync runs after the memtable logs' msyncs and before the
++	// value log's.
++	BeforeValueLogSync func()
++}
++
++// SetSyncTestHooks installs the hooks and returns the function that puts the
++// previous ones back. It is a test seam, exported only because tests in other
++// packages (hoardDB's storage and cluster tests) need it; production code
++// must not call it. The hooks are package-wide, so a test that sets them must
++// not run in parallel with another that syncs. hoardDB.
++func SetSyncTestHooks(h SyncTestHooks) (restore func()) {
++	previousAfterCapture, previousBeforeValueLogSync := syncAfterUnlockHook, syncValueLogHook
++	syncAfterUnlockHook, syncValueLogHook = h.AfterCapture, h.BeforeValueLogSync
++	return func() {
++		syncAfterUnlockHook, syncValueLogHook = previousAfterCapture, previousBeforeValueLogSync
++	}
++}
+diff --git a/vouched_cut_linux_test.go b/vouched_cut_linux_test.go
+new file mode 100644
+index 0000000..7dd1d27
+--- /dev/null
++++ b/vouched_cut_linux_test.go
+@@ -0,0 +1,328 @@
++//go:build linux
++
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-17: the tests of the vouched cut
++ * (WithVouchedCut, DB.SyncVouched, change 12) that build images of a live
++ * store, as the sync-order tests do. See hoardDB/third_party/README.md.
++ */
++
++package badger
++
++import (
++	"errors"
++	"fmt"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++// versionOf returns the version key is visible at in db.
++func versionOf(t *testing.T, db *DB, key string) uint64 {
++	t.Helper()
++	var version uint64
++	require.NoError(t, db.View(func(txn *Txn) error {
++		item, err := txn.Get([]byte(key))
++		if err != nil {
++			return fmt.Errorf("reading %s: %w", key, err)
++		}
++		version = item.Version()
++		return nil
++	}))
++	return version
++}
++
++// commitAt commits key on its own and returns the version it took.
++func commitAt(t *testing.T, db *DB, key string) uint64 {
++	t.Helper()
++	setKey(t, db, key)
++	return versionOf(t, db, key)
++}
++
++// visibleVersions returns every user key of db with the version it is
++// visible at.
++func visibleVersions(t *testing.T, db *DB) map[string]uint64 {
++	t.Helper()
++	versions := map[string]uint64{}
++	require.NoError(t, db.View(func(txn *Txn) error {
++		iterator := txn.NewIterator(IteratorOptions{})
++		defer iterator.Close()
++		for iterator.Rewind(); iterator.Valid(); iterator.Next() {
++			versions[string(iterator.Item().KeyCopy(nil))] = iterator.Item().Version()
++		}
++		return nil
++	}))
++	return versions
++}
++
++// TestEntriesAboveTheMarkerAreGoneAndStayGone checks the cut at open (I-1,
++// I-2): commits above the vouched version are not visible after the open,
++// the report counts them, and once the store has taken their versions again
++// for new commits and vouched those, a second image does not bring them back.
++// The flusher is held (no compactors, level 0 at its stall) so the log the
++// cut truncated is still a log when the second image is taken: left
++// untruncated, it would replay the old commits under the new, higher vouched
++// version (the spec's probe: commits 7 and 8 returned).
++func TestEntriesAboveTheMarkerAreGoneAndStayGone(t *testing.T) {
++	held := func(o Options) Options {
++		return o.WithNumCompactors(0).WithNumLevelZeroTables(1).WithNumLevelZeroTablesStall(2)
++	}
++	db, opt := openSyncLockTestDB(t, func(o Options) Options { return held(o).WithVouchedCut(0) })
++	closeAtCleanup(t, db)
++	fillLevelZeroToStall(t, db)
++
++	vouchedKeys := []string{"vouched-1", "vouched-2", "vouched-3", "vouched-4", "vouched-5", "vouched-6"}
++	for _, key := range vouchedKeys {
++		setKey(t, db, key)
++	}
++	vouched, err := db.SyncVouched()
++	require.NoError(t, err)
++	require.Equal(t, versionOf(t, db, vouchedKeys[len(vouchedKeys)-1]), vouched,
++		"SyncVouched did not return the version of the last commit before it")
++	discardedKeys := []string{"discarded-1", "discarded-2"}
++	var discardedVersions []uint64
++	for _, key := range discardedKeys {
++		discardedVersions = append(discardedVersions, commitAt(t, db, key))
++	}
++
++	firstImage := writeImage(t, imageAt(t, opt.Dir))
++	first, err := Open(held(opt).WithDir(firstImage).WithValueDir(firstImage).WithVouchedCut(vouched))
++	require.NoError(t, err)
++	closeAtCleanup(t, first)
++	for _, key := range vouchedKeys {
++		require.True(t, hasKey(t, first, key), "%s, at or below the vouched version %d, is gone after the cut", key, vouched)
++	}
++	for _, key := range discardedKeys {
++		require.False(t, hasKey(t, first, key), "%s, above the vouched version %d, is visible after the cut", key, vouched)
++	}
++	firstReport := first.VouchedCutReport()
++
++	// The versions the cut discarded are handed out again.
++	againKeys := []string{"again-1", "again-2"}
++	for i, key := range againKeys {
++		require.Equal(t, discardedVersions[i], commitAt(t, first, key),
++			"SCENARIO NOT REACHED: %s did not take the discarded version %d again", key, discardedVersions[i])
++	}
++	vouchedAgain, err := first.SyncVouched()
++	require.NoError(t, err)
++	require.Equal(t, discardedVersions[len(discardedVersions)-1], vouchedAgain)
++
++	secondImage := writeImage(t, imageAt(t, firstImage))
++	second, err := Open(opt.WithDir(secondImage).WithValueDir(secondImage).WithVouchedCut(vouchedAgain).
++		WithNumCompactors(2).WithNumLevelZeroTables(5).WithNumLevelZeroTablesStall(15))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, second.Close()) }()
++	for _, key := range discardedKeys {
++		require.False(t, hasKey(t, second, key), "%s, discarded by the first cut, came back after a second image "+
++			"under the vouched version %d: the truncation was not durable", key, vouchedAgain)
++	}
++	for _, key := range append(vouchedKeys, againKeys...) {
++		require.True(t, hasKey(t, second, key), "%s is gone after the second image", key)
++	}
++	require.Equal(t, VouchedCutReport{Vouched: vouched, Kept: vouched, DiscardedTxns: 2, LogsTruncated: 1}, firstReport,
++		"the first open's report does not count the two commits it discarded")
++}
++
++// TestLargeValueUnderAnUnfinishedSyncIsReplayedWhole is BUG-0827's route (c)
++// at the store: a value in the value log whose pointer reached the disk in a
++// memtable log that a sync made durable, while the value log's own msync had
++// not run. A power cut between the two msyncs leaves the pointer without its
++// bytes. The commit is above the vouched version, because that sync never
++// reported, so the cut discards it and the node replays it from its log; here
++// the key must be absent, never present with an empty or unreadable value.
++func TestLargeValueUnderAnUnfinishedSyncIsReplayedWhole(t *testing.T) {
++	db, opt := openSyncLockTestDB(t, func(o Options) Options {
++		return o.WithValueLogFileSize(8 << 20).WithVouchedCut(0)
++	})
++	closeAtCleanup(t, db)
++
++	setKey(t, db, "before")
++	vouched, err := db.SyncVouched()
++	require.NoError(t, err)
++	atLastCompletedSync := imageAt(t, opt.Dir)
++
++	large := make([]byte, 1<<20)
++	for i := range large {
++		large[i] = byte(i%251 + 1)
++	}
++	require.NoError(t, db.Update(func(txn *Txn) error { return txn.Set([]byte("large"), large) }))
++
++	parked := make(chan struct{})
++	release := make(chan struct{})
++	var once, releaseOnce sync.Once
++	restore := syncValueLogHook
++	syncValueLogHook = func() {
++		once.Do(func() {
++			close(parked)
++			<-release
++		})
++	}
++	syncDone := make(chan error, 1)
++	go func() {
++		_, err := db.SyncVouched()
++		syncDone <- err
++	}()
++	t.Cleanup(func() {
++		releaseOnce.Do(func() { close(release) })
++		<-syncDone
++		syncValueLogHook = restore
++	})
++	select {
++	case <-parked:
++	case <-time.After(60 * time.Second):
++		t.Fatal("SCENARIO NOT REACHED: DB.SyncVouched never reached the point between the active log's msync and the value log's")
++	}
++
++	// The memtable logs as they are now (synced), the value log as of the last
++	// completed sync.
++	imageDir := writeImage(t, imageAt(t, opt.Dir), atLastCompletedSync.only(isValueLogFile))
++	releaseOnce.Do(func() { close(release) })
++	require.NoError(t, <-syncDone)
++	syncDone <- nil
++
++	reopened, err := Open(opt.WithDir(imageDir).WithValueDir(imageDir).WithVouchedCut(vouched))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, reopened.Close()) }()
++	require.True(t, hasKey(t, reopened, "before"))
++	err = reopened.View(func(txn *Txn) error {
++		item, err := txn.Get([]byte("large"))
++		if err != nil {
++			return err
++		}
++		read, err := item.ValueCopy(nil)
++		return fmt.Errorf("present with %d bytes of %d (read error: %v)", len(read), len(large), err)
++	})
++	if !errors.Is(err, ErrKeyNotFound) {
++		t.Fatalf("a 1 MiB value committed above the vouched version %d, whose value log was not synced at the cut, "+
++			"must be absent after the open, to be replayed whole by the node; it is %v", vouched, err)
++	}
++}
++
++// TestAFlushedTableVouchesWithoutASync checks that a flushed table vouches
++// what it holds with no sync and no marker: commits, a flush, more commits,
++// an image, an open with the vouched version 0. Exactly the commits up to the
++// table's highest version are visible (I-1, C = max(V, T)).
++func TestAFlushedTableVouchesWithoutASync(t *testing.T) {
++	db, opt := openSyncLockTestDB(t, func(o Options) Options { return o.WithNumCompactors(0).WithVouchedCut(0) })
++	closeAtCleanup(t, db)
++
++	require.NoError(t, writeUntilRotated(db, activeMemTable(db), "flushed"))
++	deadline := time.Now().Add(30 * time.Second)
++	for numImmutables(db) > 0 {
++		require.True(t, time.Now().Before(deadline), "the memtable flush did not finish")
++		time.Sleep(10 * time.Millisecond)
++	}
++	require.NoError(t, writeFill(db, "unflushed", 2))
++	lastVersion := versionOf(t, db, "unflushed-00001-63")
++	var tableMax uint64
++	for _, table := range db.Tables() {
++		tableMax = max(tableMax, table.MaxVersion)
++	}
++	require.NotZero(t, tableMax, "SCENARIO NOT REACHED: no table was flushed")
++	require.Less(t, tableMax, lastVersion, "SCENARIO NOT REACHED: every commit is in a table")
++	committed := visibleVersions(t, db)
++
++	imageDir := writeImage(t, imageAt(t, opt.Dir))
++	reopened, err := Open(opt.WithDir(imageDir).WithValueDir(imageDir).WithVouchedCut(0))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, reopened.Close()) }()
++	visible := visibleVersions(t, reopened)
++	var gone, kept []string
++	for key, version := range committed {
++		_, isVisible := visible[key]
++		if version <= tableMax && !isVisible {
++			gone = append(gone, fmt.Sprintf("%s@%d", key, version))
++		}
++		if version > tableMax && isVisible {
++			kept = append(kept, fmt.Sprintf("%s@%d", key, version))
++		}
++	}
++	require.Zero(t, len(gone), "%d keys at or below the flushed table's highest version %d are gone after the open, among them %v",
++		len(gone), tableMax, gone[:min(3, len(gone))])
++	require.Zero(t, len(kept), "%d keys above the flushed table's highest version %d and the vouched version 0 are visible "+
++		"after the open, among them %v", len(kept), tableMax, kept[:min(3, len(kept))])
++	require.Equal(t, tableMax, reopened.VouchedCutReport().Kept)
++}
++
++// TestNoVersionAtOrBelowTheMarkerIsTakenAgain checks the version floor (I-3):
++// a store whose highest version is below the vouched version gives its next
++// commit a version above it, so that commit, unsynced, is discarded by the
++// next cut. Given a version at or below the marker, it would be kept as if a
++// sync had vouched it.
++func TestNoVersionAtOrBelowTheMarkerIsTakenAgain(t *testing.T) {
++	db, opt := openSyncLockTestDB(t, func(o Options) Options { return o.WithVouchedCut(0) })
++	highest := commitAt(t, db, "before")
++	require.NoError(t, db.Close())
++	vouched := highest + 100
++
++	reopened, err := Open(opt.WithVouchedCut(vouched))
++	require.NoError(t, err)
++	closeAtCleanup(t, reopened)
++	after := commitAt(t, reopened, "after")
++	require.Greater(t, after, vouched, "the first commit after an open under the vouched version %d took version %d", vouched, after)
++
++	imageDir := writeImage(t, imageAt(t, opt.Dir))
++	again, err := Open(opt.WithDir(imageDir).WithValueDir(imageDir).WithVouchedCut(vouched))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, again.Close()) }()
++	require.True(t, hasKey(t, again, "before"))
++	require.False(t, hasKey(t, again, "after"), "an unsynced commit after the open is kept by the next cut under the same vouched version")
++}
++
++// TestSyncVouchedReadsTheVersionBeforeTheCapture is T9 (f) at the store: the
++// version SyncVouched returns must be read before it captures the memtables.
++// A commit that returns after the capture and lands in a memtable rotated in
++// after it sits in a log this call never syncs, so the returned version must
++// not cover it; and every commit that returned before the call must be at or
++// below it (I-4). The commit and the rotation run inside
++// SyncTestHooks.AfterCapture, after the sync's read lock is released: under
++// that lock no commit can return (store-vouched-cut-build.md, review edit F1).
++func TestSyncVouchedReadsTheVersionBeforeTheCapture(t *testing.T) {
++	db, _ := openSyncLockTestDB(t, func(o Options) Options { return o.WithNumCompactors(0) })
++	closeAtCleanup(t, db)
++	early := commitAt(t, db, "early")
++
++	var once sync.Once
++	var hookRan, rotated bool
++	var late, capturedMax uint64
++	var hookErr error
++	restore := SetSyncTestHooks(SyncTestHooks{AfterCapture: func() {
++		once.Do(func() {
++			hookRan = true
++			captured := activeMemTable(db)
++			if hookErr = writeUntilRotated(db, captured, "rotate"); hookErr != nil {
++				return
++			}
++			if hookErr = db.Update(func(txn *Txn) error { return txn.Set([]byte("late"), []byte("after the capture")) }); hookErr != nil {
++				return
++			}
++			hookErr = db.View(func(txn *Txn) error {
++				item, err := txn.Get([]byte("late"))
++				if err != nil {
++					return err
++				}
++				late = item.Version()
++				return nil
++			})
++			rotated = activeMemTable(db) != captured
++			capturedMax = captured.maxVersion
++		})
++	}})
++	t.Cleanup(restore)
++
++	vouched, err := db.SyncVouched()
++	require.NoError(t, err)
++	require.True(t, hookRan, "SCENARIO NOT REACHED: SyncTestHooks.AfterCapture never ran inside DB.SyncVouched")
++	require.NoError(t, hookErr)
++	require.True(t, rotated, "SCENARIO NOT REACHED: the memtable did not rotate inside the hook")
++	require.Less(t, capturedMax, late, "SCENARIO NOT REACHED: the late commit is in the memtable the sync captured")
++
++	require.Less(t, vouched, late, "DB.SyncVouched returned version %d, which covers the commit at version %d that "+
++		"returned after its capture, in a memtable log it never synced: the version was read after the capture", vouched, late)
++	require.GreaterOrEqual(t, vouched, early, "DB.SyncVouched returned version %d, below the commit at version %d "+
++		"that returned before it was called", vouched, early)
++}
+diff --git a/vouched_cut_test.go b/vouched_cut_test.go
+new file mode 100644
+index 0000000..ea2746b
+--- /dev/null
++++ b/vouched_cut_test.go
+@@ -0,0 +1,388 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Added by the hoardDB project, 2026-11-17: the tests of the vouched cut
++ * (WithVouchedCut, change 12) that do not depend on the page cache, and the
++ * image helper the cut's tests share. See hoardDB/third_party/README.md.
++ */
++
++package badger
++
++import (
++	"bytes"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++// storeImage is the bytes of every regular file of a store directory as of
++// one instant, copied at that instant. An image of what a power cut can leave
++// is assembled from such copies, file by file, and never by rewriting a file:
++// a test that synthesised a log or a value log from what it remembers would
++// test its own model, not the store.
++type storeImage map[string][]byte
++
++// imageAt copies every regular file of dir now. The MANIFEST is copied first,
++// for copyDirImage's reason: a table is created and synced before the MANIFEST
++// names it, so every table the copied MANIFEST names is already on disk when
++// the directory is listed.
++func imageAt(t *testing.T, dir string) storeImage {
++	t.Helper()
++	image := storeImage{}
++	read := func(name string) {
++		content, err := os.ReadFile(filepath.Join(dir, name))
++		require.NoError(t, err, "copying %s into an image", name)
++		image[name] = content
++	}
++	read(ManifestFilename)
++	entries, err := os.ReadDir(dir)
++	require.NoError(t, err)
++	for _, entry := range entries {
++		if !entry.Type().IsRegular() || entry.Name() == ManifestFilename || entry.Name() == lockFile {
++			continue
++		}
++		read(entry.Name())
++	}
++	return image
++}
++
++// only returns the files of the image whose names keep accepts.
++func (image storeImage) only(keep func(name string) bool) storeImage {
++	kept := storeImage{}
++	for name, content := range image {
++		if keep(name) {
++			kept[name] = content
++		}
++	}
++	return kept
++}
++
++func isValueLogFile(name string) bool { return strings.HasSuffix(name, ".vlog") }
++
++// writeImage writes base's files into a new directory, each file of a later
++// override replacing the one of the same name, and returns the directory.
++func writeImage(t *testing.T, base storeImage, overrides ...storeImage) string {
++	t.Helper()
++	dir := t.TempDir()
++	merged := storeImage{}
++	for _, image := range append([]storeImage{base}, overrides...) {
++		for name, content := range image {
++			merged[name] = content
++		}
++	}
++	for name, content := range merged {
++		require.NoError(t, os.WriteFile(filepath.Join(dir, name), content, 0o600))
++	}
++	return dir
++}
++
++// cutTestOptions are small memtables and a small value threshold, as
++// openSyncLockTestDB's, in dir. Level 0 stalls at two tables and nothing
++// compacts, so once holdTheFlusher has run a rotated memtable stays in db.imm
++// and its log stays on disk.
++func cutTestOptions(dir string) Options {
++	return getTestOptions(dir).
++		WithMemTableSize(1 << 20).
++		WithValueThreshold(1 << 10).
++		WithValueLogFileSize(1 << 20).
++		WithNumCompactors(0).
++		WithNumLevelZeroTables(1).
++		WithNumLevelZeroTablesStall(2)
++}
++
++// commitBatch commits 64 inline 512-byte values under prefix in one
++// transaction.
++func commitBatch(db *DB, prefix string) error {
++	return db.Update(func(txn *Txn) error {
++		for i := range 64 {
++			if err := txn.Set([]byte(fmt.Sprintf("%s-%02d", prefix, i)), make([]byte, 512)); err != nil {
++				return err
++			}
++		}
++		return nil
++	})
++}
++
++func activeMemTable(db *DB) *memTable {
++	db.lock.RLock()
++	defer db.lock.RUnlock()
++	return db.mt
++}
++
++// commitUntilRotatedFrom commits batches until mt is no longer the active
++// memtable. The batch that rotated it is in the new active memtable.
++func commitUntilRotatedFrom(db *DB, mt *memTable, prefix string) error {
++	for batch := 0; activeMemTable(db) == mt; batch++ {
++		if batch > 1000 {
++			return errors.New("the memtable never rotated")
++		}
++		if err := commitBatch(db, fmt.Sprintf("%s-%04d", prefix, batch)); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// holdTheFlusher flushes memtables until level 0 holds two tables, then
++// rotates one more memtable and waits until the flusher has taken it. With
++// the options of cutTestOptions that flush waits at the level-0 stall, after
++// it has written its table and named it in the MANIFEST
++// (levelsController.addLevel0Table), so every memtable rotated after this
++// returns waits in the flush channel and keeps its log as the only copy of
++// its commits.
++func holdTheFlusher(t *testing.T, db *DB) {
++	t.Helper()
++	waitUntil := func(what string, done func() bool) {
++		deadline := time.Now().Add(30 * time.Second)
++		for !done() {
++			require.True(t, time.Now().Before(deadline), "%s did not happen within 30 s", what)
++			time.Sleep(10 * time.Millisecond)
++		}
++	}
++	immutables := func() int {
++		db.lock.RLock()
++		defer db.lock.RUnlock()
++		return len(db.imm)
++	}
++	for batch := 0; db.lc.levels[0].numTables() < 2; batch++ {
++		require.NoError(t, commitUntilRotatedFrom(db, activeMemTable(db), fmt.Sprintf("hold-%04d", batch)))
++		waitUntil("a memtable flush", func() bool { return immutables() == 0 })
++	}
++	require.NoError(t, commitUntilRotatedFrom(db, activeMemTable(db), "held"))
++	waitUntil("the flusher taking the held memtable", func() bool { return len(db.flushChan) == 0 })
++}
++
++func setKey(t *testing.T, db *DB, key string) {
++	t.Helper()
++	require.NoError(t, db.Update(func(txn *Txn) error { return txn.Set([]byte(key), []byte("value of "+key)) }))
++}
++
++// hasKey reports whether key is visible in db; any error but a miss fails the
++// test.
++func hasKey(t *testing.T, db *DB, key string) bool {
++	t.Helper()
++	err := db.View(func(txn *Txn) error {
++		_, err := txn.Get([]byte(key))
++		return err
++	})
++	if errors.Is(err, ErrKeyNotFound) {
++		return false
++	}
++	require.NoError(t, err, "reading %s", key)
++	return true
++}
++
++// TestTheCutIsDurableBeforeTheFirstCommit checks that the cut's truncation and
++// removals are on disk before Open returns: the truncated log is fsynced
++// after its truncation, the directory after the removal of the log the cut
++// emptied. The versions the cut discards are handed out again, so if the old
++// bytes survived a crash right after the open, a later, higher vouched version
++// would vouch them (I-2). A seam test: cutSyncFile and cutSyncDir are
++// replaced by recorders, as manifest.go's syncFunc is in its tests; it does
++// not cut the power.
++func TestTheCutIsDurableBeforeTheFirstCommit(t *testing.T) {
++	dir := t.TempDir()
++	opt := cutTestOptions(dir).WithVouchedCut(0)
++	db, err := Open(opt)
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, db.Close()) })
++	holdTheFlusher(t, db)
++
++	setKey(t, db, "vouched")
++	vouched, err := db.SyncVouched()
++	require.NoError(t, err)
++	// The first log keeps "vouched" and loses everything after it; the second
++	// holds only commits above the vouched version, so the cut empties it.
++	cutLog := activeMemTable(db)
++	setKey(t, db, "cut-from-the-first-log")
++	require.NoError(t, commitUntilRotatedFrom(db, cutLog, "rotate"))
++	removedLog := activeMemTable(db)
++	setKey(t, db, "in-the-removed-log")
++	cutLogName, removedLogName := filepath.Base(cutLog.wal.Fd.Name()), filepath.Base(removedLog.wal.Fd.Name())
++
++	image := imageAt(t, dir)
++	require.Contains(t, image, cutLogName, "SCENARIO NOT REACHED: the first log is not in the image (it was flushed)")
++	require.Contains(t, image, removedLogName)
++	imageDir := writeImage(t, image)
++
++	var events []string
++	var openReturned atomic.Bool
++	var cutLogSizeAtSync int64 = -1
++	var removedLogExistedAtDirSync bool
++	restoreFile, restoreDir := cutSyncFile, cutSyncDir
++	t.Cleanup(func() { cutSyncFile, cutSyncDir = restoreFile, restoreDir })
++	cutSyncFile = func(f *os.File) error {
++		name := filepath.Base(f.Name())
++		events = append(events, fmt.Sprintf("fsync %s (open returned: %v)", name, openReturned.Load()))
++		if name == cutLogName {
++			info, err := f.Stat()
++			if err != nil {
++				return err
++			}
++			cutLogSizeAtSync = info.Size()
++		}
++		return f.Sync()
++	}
++	cutSyncDir = func(syncedDir string) error {
++		events = append(events, fmt.Sprintf("fsync the directory (open returned: %v)", openReturned.Load()))
++		_, err := os.Stat(filepath.Join(syncedDir, removedLogName))
++		removedLogExistedAtDirSync = err == nil
++		return syncDir(syncedDir)
++	}
++
++	reopened, err := Open(opt.WithDir(imageDir).WithValueDir(imageDir).WithVouchedCut(vouched).
++		WithNumCompactors(2).WithNumLevelZeroTables(5).WithNumLevelZeroTablesStall(15))
++	require.NoError(t, err)
++	openReturned.Store(true)
++	defer func() { require.NoError(t, reopened.Close()) }()
++
++	require.Equal(t, []string{
++		fmt.Sprintf("fsync %s (open returned: false)", cutLogName),
++		"fsync the directory (open returned: false)",
++	}, events, "the cut must fsync the truncated log and then the directory, both inside Open: "+
++		"without them a crash right after the open can bring the discarded commits back under versions handed out again")
++	require.Less(t, cutLogSizeAtSync, int64(len(image[cutLogName])),
++		"the log %s was fsynced before it was truncated (its size then was %d, %d in the image)",
++		cutLogName, cutLogSizeAtSync, len(image[cutLogName]))
++	require.False(t, removedLogExistedAtDirSync, "the directory was fsynced before the log %s the cut emptied was removed", removedLogName)
++	require.True(t, hasKey(t, reopened, "vouched"))
++	require.False(t, hasKey(t, reopened, "cut-from-the-first-log"))
++	require.False(t, hasKey(t, reopened, "in-the-removed-log"))
++}
++
++// TestTheCutIsOptIn pins I-7 at the store: without WithVouchedCut nothing of
++// the cut runs, so every log entry is kept; with it, the calls that write out
++// of version order are refused, and ReadOnly, InMemory and managed mode
++// refuse the option.
++func TestTheCutIsOptIn(t *testing.T) {
++	t.Run("without the option every log entry is kept", func(t *testing.T) {
++		dir := t.TempDir()
++		opt := cutTestOptions(dir)
++		db, err := Open(opt)
++		require.NoError(t, err)
++		defer func() { require.NoError(t, db.Close()) }()
++		setKey(t, db, "synced")
++		require.NoError(t, db.Sync())
++		setKey(t, db, "unsynced")
++		imageDir := writeImage(t, imageAt(t, dir))
++
++		reopened, err := Open(opt.WithDir(imageDir).WithValueDir(imageDir))
++		require.NoError(t, err)
++		defer func() { require.NoError(t, reopened.Close()) }()
++		require.True(t, hasKey(t, reopened, "synced"))
++		require.True(t, hasKey(t, reopened, "unsynced"), "a store opened without WithVouchedCut lost a log entry")
++		require.Equal(t, VouchedCutReport{}, reopened.VouchedCutReport())
++	})
++
++	refused := []struct {
++		call string
++		run  func(db *DB) error
++	}{
++		{"DB.RunValueLogGC", func(db *DB) error { return db.RunValueLogGC(0.5) }},
++		{"DB.Load", func(db *DB) error { return db.Load(bytes.NewReader(nil), 1) }},
++		{"DB.DropAll", func(db *DB) error { return db.DropAll() }},
++		{"DB.DropPrefix", func(db *DB) error { return db.DropPrefix([]byte("synced")) }},
++		// Cancel releases what a Prepare that was not refused took (writes
++		// blocked, compactions stopped); it is a no-op after a refusal.
++		{"StreamWriter.Prepare", func(db *DB) error {
++			writer := db.NewStreamWriter()
++			defer writer.Cancel()
++			return writer.Prepare()
++		}},
++		{"StreamWriter.PrepareIncremental", func(db *DB) error {
++			writer := db.NewStreamWriter()
++			defer writer.Cancel()
++			return writer.PrepareIncremental()
++		}},
++		{"DB.BanNamespace", func(db *DB) error { return db.BanNamespace(1) }},
++	}
++	for _, tc := range refused {
++		t.Run("refuses "+tc.call, func(t *testing.T) {
++			db, err := Open(cutTestOptions(t.TempDir()).WithVouchedCut(0))
++			require.NoError(t, err)
++			defer func() { require.NoError(t, db.Close()) }()
++			setKey(t, db, "synced")
++
++			err = tc.run(db)
++			require.ErrorIs(t, err, ErrVouchedCutRefused, "%s under a vouched cut", tc.call)
++			require.ErrorContains(t, err, tc.call)
++			require.True(t, hasKey(t, db, "synced"), "%s changed the store although it was refused", tc.call)
++			setKey(t, db, "after-the-refusal")
++		})
++	}
++
++	t.Run("managed mode refuses the option", func(t *testing.T) {
++		db, err := OpenManaged(cutTestOptions(t.TempDir()).WithVouchedCut(0))
++		if err == nil {
++			require.NoError(t, db.Close())
++		}
++		require.ErrorIs(t, err, ErrVouchedCutRefused)
++		require.ErrorContains(t, err, "managed mode")
++	})
++	t.Run("ReadOnly refuses the option", func(t *testing.T) {
++		dir := t.TempDir()
++		created, err := Open(cutTestOptions(dir))
++		require.NoError(t, err)
++		require.NoError(t, created.Close())
++		db, err := Open(cutTestOptions(dir).WithReadOnly(true).WithVouchedCut(0))
++		if err == nil {
++			require.NoError(t, db.Close())
++		}
++		require.ErrorIs(t, err, ErrVouchedCutRefused)
++		require.ErrorContains(t, err, "ReadOnly")
++	})
++	t.Run("InMemory refuses the option", func(t *testing.T) {
++		db, err := Open(DefaultOptions("").WithInMemory(true).WithLoggingLevel(WARNING).WithVouchedCut(0))
++		if err == nil {
++			require.NoError(t, db.Close())
++		}
++		require.ErrorIs(t, err, ErrVouchedCutRefused)
++		require.ErrorContains(t, err, "InMemory")
++	})
++}
++
++// TestLogFilesCreatedMovesWithEveryNewLogFile: [GUARD every memtable log and
++// value-log file the DB creates moves DB.LogFilesCreated, and Open starts it
++// above 0; red when a rotation or a new value-log file is not counted]. The
++// caller of SyncVouched fsyncs the directory only when the count moved, so a
++// file left out of it could lose its directory entry at a power cut while the
++// caller's marker vouches its commits (store-vouched-cut slice S-3).
++func TestLogFilesCreatedMovesWithEveryNewLogFile(t *testing.T) {
++	opt := DefaultOptions(t.TempDir()).WithLogger(nil).WithMemTableSize(1 << 20).
++		WithValueLogFileSize(1 << 20).WithValueThreshold(1 << 10)
++	db, err := Open(opt)
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++	atOpen := db.LogFilesCreated()
++	require.Positive(t, atOpen, "Open must count the files it found or created as not yet covered")
++
++	// The file ids only grow: the next memtable log's id and the newest value-log file's.
++	memFid, vlogFid := db.nextMemFid, db.vlog.maxFid
++	// Small values rotate the memtable; values above the threshold fill value-log files.
++	for i := 0; i < 2000; i++ {
++		require.NoError(t, db.Update(func(txn *Txn) error {
++			if err := txn.Set([]byte(fmt.Sprintf("small-%04d", i)), bytes.Repeat([]byte{'s'}, 900)); err != nil {
++				return err
++			}
++			return txn.Set([]byte(fmt.Sprintf("large-%04d", i)), bytes.Repeat([]byte{'l'}, 8<<10))
++		}))
++	}
++	db.lock.Lock()
++	createdLogs := db.nextMemFid - memFid
++	db.lock.Unlock()
++	db.vlog.filesLock.RLock()
++	createdVlogs := int(db.vlog.maxFid - vlogFid)
++	db.vlog.filesLock.RUnlock()
++	require.Positive(t, createdLogs, "SCENARIO NOT REACHED: the memtable never rotated")
++	require.Positive(t, createdVlogs, "SCENARIO NOT REACHED: no value-log file was created")
++	require.Equal(t, uint64(createdLogs)+uint64(createdVlogs), db.LogFilesCreated()-atOpen,
++		"the count did not move once per file created")
++}

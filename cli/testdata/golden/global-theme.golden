@@ -1,0 +1,6 @@
+> theme
+name:       plain
+source:     plain
+colour:     no (plain theme requested)
+background: unknown (no OSC 11 reply)
+prompt:     [h]oardDB [app]> 

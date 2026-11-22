@@ -1,0 +1,91 @@
+Generator of storage/testdata/ring-format-1/: a ring directory written by the build at
+6827a7b3a (next, 2026-11-02), before the FORMAT marker, record format 2 and dedupe format 3
+existed. It was dropped into cluster/wire/ as zz_ringformat1_generator_test.go and run once
+with RING_FORMAT1_FIXTURE_OUT set, from hoardDB/:
+
+    RING_FORMAT1_FIXTURE_OUT=$PWD/storage/testdata/ring-format-1 go test ./cluster/wire -run TestZZGenerateRingFormat1Fixture -count=1 -v
+
+The run reported five version-0x01 log records (seq 1..5, class 0x01: the two inserts a
+bucket creation writes and the three user inserts) and the matching format-0x02 dedupe
+entries. raft/ and incarnation were not copied; there is no FORMAT file. badger/ is 1,049,665
+bytes (the 1 MiB DISCARD file is zeros), under the 2 MiB bound, so the whole directory is
+checked in.
+
+----8<---- the throwaway test ----8<----
+
+package wire
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/hoarddb/hoarddb-bson/bson"
+
+	"hoardDB/storage"
+)
+
+// Throwaway: generates the ring-format-1 fixture from the base tree (6827a7b3a), before the
+// FORMAT marker, record format 2 and dedupe format 3 exist. It opens a ring node on a temp
+// directory, writes three operations (three format-0x02 dedupe entries in Badger and three
+// version-0x01 records in the log), closes it, and copies out badger/ and wal/ only.
+//
+//	RING_FORMAT1_FIXTURE_OUT=/abs/path/storage/testdata/ring-format-1 go test ./cluster/wire -run TestZZGenerateRingFormat1Fixture -count=1
+func TestZZGenerateRingFormat1Fixture(t *testing.T) {
+	out := os.Getenv("RING_FORMAT1_FIXTURE_OUT")
+	if out == "" {
+		t.Skip("RING_FORMAT1_FIXTURE_OUT not set")
+	}
+	dir := t.TempDir()
+	ctx := context.Background()
+	node, err := OpenNode(ctx, NodeConfig{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u30iSchema(t, node)
+	for i, name := range []string{"Ada", "Grace", "Linus"} {
+		request := [16]byte{0xF1, byte(i + 1)}
+		if _, err := node.Insert(ctx, u30iDB, "User", bson.D{{Key: "_id_", Value: name}, {Key: "Name", Value: name}, {Key: "Age", Value: int32(30 + i)}, {Key: "City", Value: "Oslo"}}, WithRequestID(request)); err != nil {
+			t.Fatalf("insert %s: %v", name, err)
+		}
+	}
+	entries, err := node.wal.ReadFrom(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("log holds %d entries", len(entries))
+	for _, entry := range entries {
+		t.Logf("seq %d op %#02x version %#02x", entry.Seq, entry.Op, entry.Data[0])
+	}
+	if err := node.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []string{"badger", "wal"} {
+		if err := copyTree(filepath.Join(dir, part), filepath.Join(out, part)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = storage.NSDedupe
+}
+
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, raw, 0o644)
+	})
+}

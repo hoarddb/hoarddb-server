@@ -1,0 +1,8 @@
+> create database app2
+OK  created database app2
+Next: use app2
+Then: create bucket <name> {type: hash | btree | fifo | lifo | heap | blob}   (hash is the default)
+     create bucket Post {Photos lifoStore, Comments fifoStore}
+     a store field is <name> <type>Store — hashStore, btreeStore, fifoStore, lifoStore, heapStore, blobStore
+> create database app
+Error: create database "app": server error (2): database "app" already exists

@@ -1,0 +1,133 @@
+$ hoarddb dump <connection flags> --out <OUT-DIR>/text app
+exit: 0
+--- stdout ---
+--- stderr ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+Authenticated as admin
+Connected to <ADDR>
+dumping app/Emails...
+  app/Emails: 1 documents, 43 bytes, sha256:<DIGEST>
+dumping app/Events...
+  app/Events: 1 documents, 34 bytes, sha256:<DIGEST>
+dumping app/Files...
+  app/Files: 1 documents, 199 bytes, sha256:<DIGEST>
+dumping app/Jobs...
+  app/Jobs: 1 documents, 64 bytes, sha256:<DIGEST>
+dumping app/Post...
+  app/Post: 1 documents, 35 bytes, sha256:<DIGEST>
+dumping app/Tasks...
+  app/Tasks: 1 documents, 141 bytes, sha256:<DIGEST>
+dumping app/Users...
+  app/Users: 2 documents, 50 bytes, sha256:<DIGEST>
+warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+dump: 1 database(s), 7 bucket(s), 8 document(s), 566 byte(s)
+  warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+
+$ hoarddb dump <connection flags> --json --out <OUT-DIR>/json app
+exit: 0
+--- stdout ---
+{"ok":true,"databases":["app"],"buckets":7,"documents":8,"users_recreated":0,"users_awaiting_password":0,"bytes":566,"warnings":["blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup."],"errors":[]}
+--- stderr ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+Authenticated as admin
+Connected to <ADDR>
+dumping app/Emails...
+  app/Emails: 1 documents, 43 bytes, sha256:<DIGEST>
+dumping app/Events...
+  app/Events: 1 documents, 34 bytes, sha256:<DIGEST>
+dumping app/Files...
+  app/Files: 1 documents, 199 bytes, sha256:<DIGEST>
+dumping app/Jobs...
+  app/Jobs: 1 documents, 64 bytes, sha256:<DIGEST>
+dumping app/Post...
+  app/Post: 1 documents, 35 bytes, sha256:<DIGEST>
+dumping app/Tasks...
+  app/Tasks: 1 documents, 141 bytes, sha256:<DIGEST>
+dumping app/Users...
+  app/Users: 2 documents, 50 bytes, sha256:<DIGEST>
+warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+
+$ hoarddb dump <connection flags> --out <OUT-DIR>/one app Users
+exit: 0
+--- stdout ---
+--- stderr ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+Authenticated as admin
+Connected to <ADDR>
+dumping app/Users...
+  app/Users: 2 documents, 50 bytes, sha256:<DIGEST>
+dump: 1 database(s), 1 bucket(s), 2 document(s), 50 byte(s)
+
+$ hoarddb dump <connection flags> --json --out <OUT-DIR>/none-succeeded app Nope
+exit: 2
+--- stdout ---
+{"ok":false,"databases":[],"buckets":0,"documents":0,"users_recreated":0,"users_awaiting_password":0,"bytes":0,"errors":[{"database":"app","bucket":"Nope","error":"dump start: server error (1): bucket not found: bucket \"Nope\" not found in database \"app\". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it"}]}
+--- stderr ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+Authenticated as admin
+Connected to <ADDR>
+
+$ hoarddb dump <connection flags> --out <OUT-DIR>/nodb nope
+exit: 2
+--- stdout ---
+--- stderr ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+Authenticated as admin
+Connected to <ADDR>
+dump: resolving dump scope: listing buckets in "nope": server error (1): database "nope" not found on this node. Run 'show databases' to list what exists, or 'create database nope' to create it
+
+$ hoarddb dump <connection flags> --bogus
+exit: 1
+--- stdout ---
+--- stderr ---
+usage: hoarddb dump [database [bucket]] [flags]
+flag provided but not defined: -bogus
+Usage of hoarddb dump:
+  -address string
+    	hoardDB server address (TCP driver port). Without it the CLI dials the tcp.listen address of the loaded configuration (env HOARDDB_TCP_LISTEN; 127.0.0.1:7433 when nothing is configured), and this default only if that is empty (default "localhost:7433")
+  -auth-token string
+    	AUTH resumption token (env: HOARDDB_AUTH_TOKEN)
+  -bucket string
+    	bucket (alias for the second positional argument)
+  -config string
+    	path to YAML configuration file
+  -db string
+    	database (alias for the first positional argument)
+  -fingerprint value
+    	pin the server's certificate fingerprint, SHA256:<64 hex>, which the server prints when it starts
+  -insecure
+    	skip TLS certificate verification (local development only)
+  -json
+    	print one JSON result object to stdout instead of a text summary
+  -no-users
+    	skip users.json
+  -out string
+    	destination directory (default "./dump")
+  -password string
+    	root password (env: HOARDDB_ROOT_PASSWORD)
+  -user string
+    	root username (env: HOARDDB_ROOT_USER)
+  -users
+    	include users.json (not yet implemented; accepted for forward compatibility) (default true)
+
+
+$ hoarddb dump <connection flags> --out <OUT-DIR>/x a b c
+exit: 1
+--- stdout ---
+--- stderr ---
+usage: hoarddb dump [database [bucket]] [flags] — too many positional arguments
+
+$ hoarddb dump <connection flags> --out <OUT-DIR>/deadhost app
+exit: 2
+--- stdout ---
+--- stderr ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <DEAD-ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+failed to connect to <DEAD-ADDR>: connect to <DEAD-ADDR>: dial <DEAD-ADDR>: dial tcp <DEAD-ADDR>: connect: connection refused
+
+$ hoarddb dump <connection flags> --out <OUT-DIR>/badpassword app
+exit: 2
+--- stdout ---
+--- stderr ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+failed to connect to <ADDR>: authenticate as admin: authentication failed (CREDENTIALS): invalid username or password
+

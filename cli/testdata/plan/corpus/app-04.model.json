@@ -1,0 +1,84 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-04",
+ "kinds": [
+  {
+   "name": "sale",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "shipment",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "sale_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "sale",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "product",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "shipment",
+   "by": [
+    "sale_id"
+   ],
+   "sort": [
+    "id:desc"
+   ],
+   "sort_from": "fixed"
+  },
+  {
+   "op": "join",
+   "coll": "shipment",
+   "join": {
+    "to": "sale",
+    "on": "id",
+    "kind": "pk"
+   }
+  },
+  {
+   "op": "update",
+   "coll": "shipment",
+   "guard": {
+    "status": "open"
+   }
+  }
+ ]
+}

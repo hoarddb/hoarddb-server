@@ -1,0 +1,664 @@
+diff --git a/db.go b/db.go
+index 857415ba..0be123b8 100644
+--- a/db.go
++++ b/db.go
+@@ -4,6 +4,13 @@
+  *
+  * Modified by the hoardDB project, 2026-10-01: DB.Sync also syncs the WAL of
+  * every immutable memtable. See hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-10-05: a memtable flush that keeps
++ * failing refuses writes (ErrWritesRefused, DB.WriteRefusal) instead of
++ * acknowledging them while it retries forever; Close stops retrying it and
++ * reports the memtables it left unflushed; a full memtable that cannot be
++ * replaced stays current and refuses the write instead of leaving no
++ * memtable. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -118,6 +125,19 @@ type DB struct {
+ 	blockWrites atomic.Int32
+ 	isClosed    atomic.Uint32
+ 
++	// flushRefusal is set once the memtable flush has failed
++	// flushFailuresBeforeRefusal times in a row, and cleared when a flush
++	// succeeds; while set, writes are refused. rotateRefusal is set while a
++	// full memtable cannot be replaced, and cleared when one is. Both hold an
++	// error wrapping ErrWritesRefused.
++	flushRefusal  atomic.Pointer[error]
++	rotateRefusal atomic.Pointer[error]
++	// unflushed counts the memtables Close left unflushed because their flush
++	// kept failing, and unflushedCause is the last flush error. Written by the
++	// flush goroutine and read by close after it has exited.
++	unflushed      int
++	unflushedCause error
++
+ 	// gcActive is set while a vlog GC rewrite (scan + write-back) is in flight,
+ 	// and gcDiscardTs records the DB's max version captured at its start. While
+ 	// active, last-level compaction clamps its discard threshold to gcDiscardTs
+@@ -553,6 +573,20 @@ func (db *DB) IsClosed() bool {
+ 
+ func (db *DB) close() (err error) {
+ 	defer db.allocPool.Release()
++	// leftCurrent is the active memtable, left unpushed below because the
++	// flush goroutine has stopped draining; db.unflushed is read only after
++	// stopMemoryFlush has waited for that goroutine.
++	var leftCurrent int
++	var leftCause error
++	defer func() {
++		if unflushed := db.unflushed + leftCurrent; unflushed > 0 {
++			if db.unflushedCause != nil {
++				leftCause = db.unflushedCause
++			}
++			err = errors.Join(fmt.Errorf("DB.Close: %d memtables not flushed, their logs stay in %s "+
++				"and are replayed at the next open: %w", unflushed, db.opt.Dir, leftCause), err)
++		}
++	}()
+ 
+ 	db.opt.Debugf("Closing database")
+ 	db.opt.Infof("Lifetime L0 stalled for: %s\n", time.Duration(db.lc.l0stallsMs.Load()))
+@@ -602,6 +636,13 @@ func (db *DB) close() (err error) {
+ 		} else {
+ 			db.opt.Debugf("Flushing memtable")
+ 			for {
++				// The flush goroutine has stopped draining flushChan: it keeps
++				// failing. Leave the memtable, whose log is on disk.
++				if refusal := db.flushRefusal.Load(); refusal != nil {
++					leftCurrent = 1
++					leftCause = *refusal
++					break
++				}
+ 				pushedMemTable := func() bool {
+ 					db.lock.Lock()
+ 					defer db.lock.Unlock()
+@@ -898,6 +939,18 @@ func (db *DB) writeRequests(reqs []*request) error {
+ 			r.Wg.Done()
+ 		}
+ 	}
++	// failFrom reports the requests before reqs[failed] as written, since they
++	// are in the memtable and its log, and fails the rest with err. Failing the
++	// whole group told callers that writes a reopen returns were refused.
++	failFrom := func(failed int, err error) {
++		db.pub.sendUpdates(reqs[:failed])
++		for i, r := range reqs {
++			if i >= failed {
++				r.Err = err
++			}
++			r.Wg.Done()
++		}
++	}
+ 	db.opt.Debugf("writeRequests called. Writing to value log")
+ 	err := db.vlog.write(reqs)
+ 	if err != nil {
+@@ -907,7 +960,7 @@ func (db *DB) writeRequests(reqs []*request) error {
+ 
+ 	db.opt.Debugf("Writing to memtable")
+ 	var count int
+-	for _, b := range reqs {
++	for i, b := range reqs {
+ 		if len(b.Entries) == 0 {
+ 			continue
+ 		}
+@@ -916,13 +969,13 @@ func (db *DB) writeRequests(reqs []*request) error {
+ 		// has room (or the DB is closing), so we no longer busy-poll with a sleep
+ 		// here. It returns errNoRoom only when the DB is shutting down, in which
+ 		// case we surface the error instead of writing to a memtable being torn
+-		// down.
++		// down, and an ErrWritesRefused when the memtables cannot be persisted.
+ 		if err := db.ensureRoomForWrite(); err != nil {
+-			done(err)
++			failFrom(i, err)
+ 			return y.Wrap(err, "writeRequests")
+ 		}
+ 		if err := db.writeToLSM(b); err != nil {
+-			done(err)
++			failFrom(i, err)
+ 			return y.Wrap(err, "writeRequests")
+ 		}
+ 	}
+@@ -939,6 +992,9 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
+ 	if db.blockWrites.Load() == 1 {
+ 		return nil, ErrBlockedWrites
+ 	}
++	if refusal := db.flushRefusal.Load(); refusal != nil {
++		return nil, *refusal
++	}
+ 	var count, size int64
+ 	for _, e := range entries {
+ 		size += e.estimateSizeAndSetThreshold(db.valueThreshold())
+@@ -1061,6 +1117,32 @@ func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
+ 
+ var errNoRoom = errors.New("No room for write")
+ 
++// ErrWritesRefused is wrapped by the error a write gets while the DB cannot
++// persist its memtables: a memtable flush has failed several times in a row,
++// or a full memtable could not be replaced because its successor's log could
++// not be created. The error names the cause. Reads are still served.
++var ErrWritesRefused = errors.New("writes are refused: the memtables cannot be persisted")
++
++// flushFailuresBeforeRefusal is how many flush attempts in a row must fail
++// before writes are refused. One failure may be transient; the flush is
++// retried every flushRetryInterval regardless, and a success lifts the
++// refusal.
++const flushFailuresBeforeRefusal = 3
++
++const flushRetryInterval = time.Second
++
++// WriteRefusal returns the error writes are refused with, wrapping
++// ErrWritesRefused, or nil when the DB accepts writes.
++func (db *DB) WriteRefusal() error {
++	if refusal := db.flushRefusal.Load(); refusal != nil {
++		return *refusal
++	}
++	if refusal := db.rotateRefusal.Load(); refusal != nil {
++		return *refusal
++	}
++	return nil
++}
++
+ // ensureRoomForWrite is always called serially. It blocks (without busy-polling)
+ // until the current memtable can be flushed, i.e. until flushChan has room.
+ func (db *DB) ensureRoomForWrite() error {
+@@ -1073,6 +1155,18 @@ func (db *DB) ensureRoomForWrite() error {
+ 		return nil
+ 	}
+ 
++	// The successor is created before the full memtable is handed to the
++	// flusher. Created after, a failure (its log cannot be created: the
++	// directory is gone, the disk is full) left db.mt nil, and the next write
++	// failed the assertion above, which exits the process.
++	next, err := db.newMemTable()
++	if err != nil {
++		refusal := fmt.Errorf("%w: creating a memtable log in %s: %w", ErrWritesRefused, db.opt.Dir, err)
++		db.rotateRefusal.Store(&refusal)
++		return refusal
++	}
++	db.rotateRefusal.Store(nil)
++
+ 	for {
+ 		select {
+ 		case db.flushChan <- db.mt:
+@@ -1080,11 +1174,8 @@ func (db *DB) ensureRoomForWrite() error {
+ 				db.mt.sl.MemSize(), len(db.flushChan))
+ 			// We manage to push this task. Let's modify imm.
+ 			db.imm = append(db.imm, db.mt)
+-			db.mt, err = db.newMemTable()
+-			if err != nil {
+-				return y.Wrapf(err, "cannot create new mem table")
+-			}
+ 			// New memtable is empty. We certainly have room.
++			db.mt = next
+ 			return nil
+ 		default:
+ 			// flushChan is full. Rather than busy-sleep, wait to be signalled when
+@@ -1104,8 +1195,14 @@ func (db *DB) ensureRoomForWrite() error {
+ 			// drain, so waiting for room is safe and cannot deadlock). This matches
+ 			// the pre-cond behavior, which looped until the push succeeded.
+ 			if db.IsClosed() {
++				next.DecrRef()
+ 				return errNoRoom
+ 			}
++			// The flusher is not draining: refuse rather than wait for it.
++			if refusal := db.flushRefusal.Load(); refusal != nil {
++				next.DecrRef()
++				return *refusal
++			}
+ 			db.flushCond.Wait()
+ 		}
+ 	}
+@@ -1168,8 +1265,13 @@ func (db *DB) handleMemTableFlush(mt *memTable, dropPrefixes [][]byte) error {
+ 	return err
+ }
+ 
+-// flushMemtable must keep running until we send it an empty memtable. If there
+-// are errors during handling the memtable flush, we'll retry indefinitely.
++// flushMemtable must keep running until flushChan is closed. A flush that
++// fails is retried every flushRetryInterval; after flushFailuresBeforeRefusal
++// failures in a row writes are refused until one succeeds. Once Close has
++// signalled lc, a memtable whose flush has failed that many times is not
++// retried: it and every memtable queued after it (flushing those first would
++// put newer versions below older ones) are left unflushed, and their logs are
++// replayed at the next open.
+ func (db *DB) flushMemtable(lc *z.Closer) {
+ 	defer lc.Done()
+ 
+@@ -1177,14 +1279,33 @@ func (db *DB) flushMemtable(lc *z.Closer) {
+ 		if mt == nil {
+ 			continue
+ 		}
++		if db.unflushed > 0 {
++			db.unflushed++
++			continue
++		}
+ 
+-		for {
++		for failures := 1; ; failures++ {
+ 			if err := db.handleMemTableFlush(mt, nil); err != nil {
+-				// Encountered error. Retry indefinitely.
+ 				db.opt.Errorf("error flushing memtable to disk: %v, retrying", err)
+-				time.Sleep(time.Second)
++				if failures >= flushFailuresBeforeRefusal && db.flushRefusal.Load() == nil {
++					refusal := fmt.Errorf("%w: flushing a memtable to %s failed %d times in a row: %w",
++						ErrWritesRefused, db.opt.Dir, failures, err)
++					db.flushRefusal.Store(&refusal)
++					// Wake a writer waiting in ensureRoomForWrite for room that
++					// this goroutine will not make.
++					db.lock.Lock()
++					db.flushCond.Broadcast()
++					db.lock.Unlock()
++				}
++				if failures >= flushFailuresBeforeRefusal && db.flushStopped() {
++					db.unflushed++
++					db.unflushedCause = err
++					break
++				}
++				time.Sleep(flushRetryInterval)
+ 				continue
+ 			}
++			db.flushRefusal.Store(nil)
+ 
+ 			// Update s.imm. Need a lock.
+ 			db.lock.Lock()
+@@ -1653,7 +1774,19 @@ func (db *DB) startCompactions() {
+ func (db *DB) startMemoryFlush() {
+ 	// Start memory fluhser.
+ 	if db.closers.memtable != nil {
+-		db.flushChan = make(chan *memTable, db.opt.NumMemtables)
++		// A stop leaves in imm only the memtables whose flush kept failing.
++		// They go first, in order, so imm[0] stays the next one flushed. There
++		// can be one more of them than NumMemtables (the one being flushed had
++		// left the channel), and no goroutine drains the channel yet, so it is
++		// made to hold them all: a push that waited here would wait forever,
++		// holding db.lock.
++		db.lock.Lock()
++		db.flushChan = make(chan *memTable, max(db.opt.NumMemtables, len(db.imm)))
++		for _, mt := range db.imm {
++			db.flushChan <- mt
++		}
++		db.lock.Unlock()
++		db.unflushed, db.unflushedCause = 0, nil
+ 		db.closers.memtable = z.NewCloser(1)
+ 		go func() {
+ 			db.flushMemtable(db.closers.memtable)
+@@ -1777,11 +1910,19 @@ func (db *DB) prepareToDrop() (func(), error) {
+ 				db.opt.Errorf("writeRequests: %v", err)
+ 			}
+ 			db.stopMemoryFlush()
+-			return func() {
++			resume := func() {
+ 				db.opt.Infof("Resuming writes")
+ 				db.startMemoryFlush()
+ 				db.unblockWrite()
+-			}, nil
++			}
++			// Dropping with memtables unflushed would leave their keys behind.
++			if db.unflushed > 0 {
++				notFlushed := fmt.Errorf("%w: %d memtables could not be flushed before the drop: %w",
++					ErrWritesRefused, db.unflushed, db.unflushedCause)
++				resume()
++				return func() {}, notFlushed
++			}
++			return resume, nil
+ 		}
+ 	}
+ }
+diff --git a/flush_failure_test.go b/flush_failure_test.go
+new file mode 100644
+index 00000000..44482ed4
+--- /dev/null
++++ b/flush_failure_test.go
+@@ -0,0 +1,354 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package badger
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++
++	"github.com/dgraph-io/badger/v4/table"
++)
++
++// blockTableFiles makes the next count table files impossible to create: a
++// directory stands where each would go, so table.CreateTable's exclusive
++// create fails, while a memtable's log, a .mem file, can still be created.
++// Every flush attempt reserves a new file ID, so count bounds the attempts
++// that fail.
++func blockTableFiles(t *testing.T, db *DB, count int) {
++	t.Helper()
++	next := db.lc.nextFileID.Load()
++	for id := next; id < next+uint64(count); id++ {
++		require.NoError(t, os.Mkdir(table.NewFilename(id, db.opt.Dir), 0o700))
++	}
++}
++
++// writeUntilRefused writes 64 KiB values, one transaction each, until a
++// commit fails, and sends that error. It gives up after maxWrites.
++func writeUntilRefused(db *DB, maxWrites int, refused chan<- error) {
++	value := make([]byte, 64<<10)
++	for index := 0; index < maxWrites; index++ {
++		err := db.Update(func(txn *Txn) error {
++			return txn.Set([]byte(fmt.Sprintf("key-%06d", index)), value)
++		})
++		if err != nil {
++			refused <- err
++			return
++		}
++	}
++	refused <- nil
++}
++
++// TestAFlushThatKeepsFailingRefusesWritesAndCloseReturns: when a memtable
++// cannot be flushed, upstream retries every second forever. Writes go on
++// being acknowledged into memtables that cannot reach a table, then block
++// once every memtable is full, and Close waits for the flush and never
++// returns. A flush that keeps failing must refuse writes with its cause, and
++// Close must return, reporting what it could not flush.
++func TestAFlushThatKeepsFailingRefusesWritesAndCloseReturns(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	db, err := Open(getTestOptions(dir).WithMemTableSize(8 << 20).WithNumMemtables(2))
++	require.NoError(t, err)
++	blockTableFiles(t, db, 1000)
++
++	refused := make(chan error, 1)
++	go writeUntilRefused(db, 10000, refused)
++	select {
++	case err := <-refused:
++		require.Error(t, err, "10,000 writes of 64 KiB were acknowledged with no flush possible")
++		require.Contains(t, err.Error(), "file exists", "the refusal does not give the flush's cause")
++	case <-time.After(20 * time.Second):
++		t.Fatal("after 20 s the writes were neither refused nor done: they were blocked, or still acknowledged, with no flush possible")
++	}
++
++	closed := make(chan error, 1)
++	go func() { closed <- db.Close() }()
++	select {
++	case err := <-closed:
++		require.Error(t, err, "Close reported success with memtables it could not flush")
++		require.True(t, strings.Contains(err.Error(), "not flushed"), "Close's error does not say what it could not flush: %v", err)
++	case <-time.After(15 * time.Second):
++		t.Fatal("Close did not return within 15 s: it waits for a flush that cannot succeed")
++	}
++}
++
++// TestARemovedDirectoryRefusesWritesAndCloseReturns: with the DB's directory
++// removed, the memtable logs and the tables cannot be created. Upstream
++// handed the full memtable to the flusher before creating its successor, so
++// the failed creation left no memtable and the next write failed an
++// assertion that exits the process; Close then waited for a flush that
++// cannot succeed. Every write once the memtable is full must be refused, and
++// Close must return.
++func TestARemovedDirectoryRefusesWritesAndCloseReturns(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	db, err := Open(getTestOptions(dir).WithMemTableSize(8 << 20).WithNumMemtables(2))
++	require.NoError(t, err)
++	require.NoError(t, os.RemoveAll(dir))
++
++	refused := make(chan error, 1)
++	go writeUntilRefused(db, 10000, refused)
++	select {
++	case err := <-refused:
++		require.Error(t, err, "10,000 writes of 64 KiB were acknowledged into a removed directory")
++		require.Contains(t, err.Error(), "no such file or directory", "the refusal does not give its cause")
++	case <-time.After(20 * time.Second):
++		t.Fatal("after 20 s the writes were neither refused nor done")
++	}
++	// The write after the refusal is refused too, rather than meet no memtable.
++	err = db.Update(func(txn *Txn) error { return txn.Set([]byte("after"), []byte("refusal")) })
++	require.Error(t, err, "a write after the refusal was acknowledged")
++
++	closed := make(chan error, 1)
++	go func() { closed <- db.Close() }()
++	select {
++	case err := <-closed:
++		require.Error(t, err, "Close reported success with a memtable it could not flush")
++	case <-time.After(15 * time.Second):
++		t.Fatal("Close did not return within 15 s")
++	}
++}
++
++// TestAFlushThatRecoversLiftsTheRefusal: the refusal names ErrWritesRefused
++// and WriteRefusal reports it; once a flush succeeds, writes are accepted
++// again and nothing acknowledged before the refusal is lost.
++func TestAFlushThatRecoversLiftsTheRefusal(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	db, err := Open(getTestOptions(dir).WithMemTableSize(8 << 20).WithNumMemtables(2))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++	require.NoError(t, db.WriteRefusal())
++	// Attempts 1 to 4 fail and the refusal starts at the third; the fifth
++	// succeeds.
++	blockTableFiles(t, db, flushFailuresBeforeRefusal+1)
++
++	refused := make(chan error, 1)
++	go writeUntilRefused(db, 10000, refused)
++	var refusal error
++	select {
++	case refusal = <-refused:
++	case <-time.After(20 * time.Second):
++		t.Fatal("no write was refused within 20 s")
++	}
++	require.ErrorIs(t, refusal, ErrWritesRefused)
++	require.Contains(t, refusal.Error(), dir)
++	require.ErrorIs(t, db.WriteRefusal(), ErrWritesRefused)
++
++	require.Eventually(t, func() bool { return db.WriteRefusal() == nil }, 20*time.Second, 50*time.Millisecond,
++		"the refusal was not lifted after the flush succeeded")
++	require.NoError(t, db.Update(func(txn *Txn) error { return txn.Set([]byte("after"), []byte("recovery")) }))
++	require.NoError(t, db.View(func(txn *Txn) error {
++		_, err := txn.Get([]byte("key-000000"))
++		return err
++	}))
++}
++
++// TestADropAfterRefusedWritesFailsPromptly: a DropPrefix while flushes keep
++// failing stops the flush goroutine, which leaves the memtables it could not
++// flush in imm, one more of them than flushChan holds (the one being flushed
++// is in imm and no longer in the channel). The drop must fail promptly with
++// ErrWritesRefused, and reads and Close must not stall after it. Restarting
++// the flusher pushed every one of them into a channel of NumMemtables while
++// holding db.lock, before any goroutine could drain it: a deadlock.
++func TestADropAfterRefusedWritesFailsPromptly(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	db, err := Open(getTestOptions(dir).WithMemTableSize(8 << 20).WithNumMemtables(2))
++	require.NoError(t, err)
++	blockTableFiles(t, db, 1000)
++
++	refused := make(chan error, 1)
++	go writeUntilRefused(db, 10000, refused)
++	select {
++	case err := <-refused:
++		require.Error(t, err)
++	case <-time.After(20 * time.Second):
++		t.Fatal("no write was refused within 20 s")
++	}
++
++	dropped := make(chan error, 1)
++	go func() { dropped <- db.DropPrefix([]byte("key-")) }()
++	select {
++	case err := <-dropped:
++		require.Error(t, err, "a drop with memtables it could not flush reported success")
++	case <-time.After(15 * time.Second):
++		t.Fatal("DropPrefix did not return within 15 s")
++	}
++
++	read := make(chan error, 1)
++	go func() {
++		read <- db.View(func(txn *Txn) error {
++			_, err := txn.Get([]byte("key-000000"))
++			return err
++		})
++	}()
++	select {
++	case err := <-read:
++		require.NoError(t, err, "a key written before the refusal was not readable after the failed drop")
++	case <-time.After(10 * time.Second):
++		t.Fatal("a read did not return within 10 s of the failed drop")
++	}
++
++	closed := make(chan error, 1)
++	go func() { closed <- db.Close() }()
++	select {
++	case err := <-closed:
++		require.Error(t, err, "Close reported success with memtables it could not flush")
++	case <-time.After(15 * time.Second):
++		t.Fatal("Close did not return within 15 s after the failed drop")
++	}
++}
++
++// TestARefusedWriteIsAbsentAndAnAcknowledgedOnePresent: writes from many
++// goroutines are grouped into one writeRequests call. When the refusal comes
++// at request k of a group, requests before k are already in the memtable, and
++// its log. Each must be reported as written and each request from k on as
++// refused: after a reopen, every write reported refused is absent and every
++// write reported done is present. Failing the whole group reported writes as
++// refused that a reopen then returned.
++func TestARefusedWriteIsAbsentAndAnAcknowledgedOnePresent(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	opts := getTestOptions(dir).WithMemTableSize(8 << 20).WithNumMemtables(2)
++	db, err := Open(opts)
++	require.NoError(t, err)
++	blockTableFiles(t, db, 1000)
++	blocked, err := filepath.Glob(filepath.Join(dir, "*.sst"))
++	require.NoError(t, err)
++
++	const writers = 16
++	type outcome struct {
++		key     string
++		refused bool
++	}
++	outcomes := make(chan outcome, writers*10000)
++	var wg sync.WaitGroup
++	for writer := 0; writer < writers; writer++ {
++		wg.Add(1)
++		go func(writer int) {
++			defer wg.Done()
++			value := make([]byte, 16<<10)
++			for index := 0; index < 10000; index++ {
++				key := fmt.Sprintf("w%02d-%06d", writer, index)
++				err := db.Update(func(txn *Txn) error { return txn.Set([]byte(key), value) })
++				outcomes <- outcome{key: key, refused: err != nil}
++				if err != nil {
++					return
++				}
++			}
++		}(writer)
++	}
++	done := make(chan struct{})
++	go func() { wg.Wait(); close(done) }()
++	select {
++	case <-done:
++	case <-time.After(30 * time.Second):
++		t.Fatal("the writers were neither refused nor done within 30 s")
++	}
++	close(outcomes)
++	closed := make(chan error, 1)
++	go func() { closed <- db.Close() }()
++	select {
++	case <-closed:
++	case <-time.After(15 * time.Second):
++		t.Fatal("Close did not return within 15 s")
++	}
++
++	for _, path := range blocked {
++		require.NoError(t, os.Remove(path))
++	}
++	reopened, err := Open(opts)
++	require.NoError(t, err)
++	defer func() { require.NoError(t, reopened.Close()) }()
++	var acknowledged, refused, refusedPresent, acknowledgedMissing int
++	require.NoError(t, reopened.View(func(txn *Txn) error {
++		for result := range outcomes {
++			_, err := txn.Get([]byte(result.key))
++			present := err == nil
++			if err != nil && !errors.Is(err, ErrKeyNotFound) {
++				return err
++			}
++			switch {
++			case result.refused:
++				refused++
++				if present {
++					refusedPresent++
++				}
++			default:
++				acknowledged++
++				if !present {
++					acknowledgedMissing++
++				}
++			}
++		}
++		return nil
++	}))
++	t.Logf("acknowledged %d, refused %d", acknowledged, refused)
++	require.Positive(t, refused)
++	require.Zero(t, refusedPresent, "%d of %d writes reported refused were present after a reopen", refusedPresent, refused)
++	require.Zero(t, acknowledgedMissing, "%d of %d acknowledged writes were missing after a reopen", acknowledgedMissing, acknowledged)
++}
++
++// TestAFlushRefusalWithRoomInTheMemtableRefusesWrites: the refusal is set by
++// the flusher after the full memtable was handed over, so the replacement
++// memtable is empty and ensureRoomForWrite finds room and does not refuse.
++// Only the check in sendToWriteCh stops a write then. Without it the write is
++// acknowledged into a memtable whose successors cannot be flushed.
++func TestAFlushRefusalWithRoomInTheMemtableRefusesWrites(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	db, err := Open(getTestOptions(dir).WithMemTableSize(8 << 20).WithNumMemtables(2))
++	require.NoError(t, err)
++	blockTableFiles(t, db, 1000)
++
++	// Fill one memtable and no more: stop once it has been handed to the
++	// flusher, which then fails and sets the refusal.
++	value := make([]byte, 64<<10)
++	handedOver := func() bool {
++		db.lock.RLock()
++		defer db.lock.RUnlock()
++		return len(db.imm) > 0
++	}
++	for index := 0; !handedOver(); index++ {
++		require.Less(t, index, 1000, "no memtable was handed to the flusher")
++		require.NoError(t, db.Update(func(txn *Txn) error {
++			return txn.Set([]byte(fmt.Sprintf("key-%06d", index)), value)
++		}))
++	}
++	require.Eventually(t, func() bool { return db.WriteRefusal() != nil }, 20*time.Second, 50*time.Millisecond,
++		"the flusher did not set the refusal")
++
++	db.lock.RLock()
++	hasRoom := !db.mt.isFull()
++	db.lock.RUnlock()
++	require.True(t, hasRoom, "the memtable is full, so ensureRoomForWrite would refuse and this test would not reach sendToWriteCh's check")
++
++	err = db.Update(func(txn *Txn) error { return txn.Set([]byte("after"), []byte("refusal")) })
++	require.ErrorIs(t, err, ErrWritesRefused, "a write was acknowledged while the flusher keeps failing")
++
++	closed := make(chan error, 1)
++	go func() { closed <- db.Close() }()
++	select {
++	case <-closed:
++	case <-time.After(15 * time.Second):
++		t.Fatal("Close did not return within 15 s")
++	}
++}

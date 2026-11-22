@@ -1,0 +1,161 @@
+[h]oardDB> help
+hoardDB Query Language (HQL) — Quick Start
+==========================================
+
+Set up:
+  create database app                         Make a database.
+  use app                                     Work inside it from now on.
+  create bucket User { Name string, Purchases fifoStore }  Declare its fields.
+Put data in and read it back:
+  db.User.insert({_id_: "ada", Name: "Ada"})  Add a document; "ada" is its id.
+  db.User["ada"].get()                        Read it back by id.
+  db.User.list()                              Every document, a page at a time.
+Use a document's own store (here, Ada's Purchases queue):
+  db.User["ada"].Purchases.push({Item: "coffee"})  Add to the end.
+  db.User["ada"].Purchases.peek()             Look at the next one.
+  db.User["ada"].Purchases.pop()              Take it off.
+Look around:
+  show databases                              The databases you can use.
+  show buckets                                Buckets of the database in use.
+  describe bucket User                        A bucket's fields and stores.
+
+More: 'help <word>' shows every form of one statement, as in 'help push';
+'help all' lists every statement. Change or remove: help update, help delete.
+Tab completes statements and names. 'exit' leaves.
+[h]oardDB> help all
+hoardDB Query Language (HQL) — Every Statement
+==============================================
+
+'help <word>' shows one statement with examples. Tab completes every word.
+
+Schema Management:
+  create database <name> [{ <options> }]        Make a database.
+  create bucket <name> [in <db>] { <Field> <type>, … }  Declare a bucket.
+  alter bucket <name> [in <db>] { add <Field> <type>, … }  Add or drop fields.
+  drop bucket <name> [in <db>]                  Drop a bucket.
+
+Read Operations:
+  show databases [limit <n>] [cursor <hex>]     The databases you can use.
+  describe database <name> [limit <n>] [cursor <hex>]  Factor and buckets.
+  show buckets [in <db>] [limit <n>] [cursor <hex>]  A database's buckets.
+  describe bucket <name> [in <db>]              A bucket's fields.
+  db.<bucket>["<id>"].get([{…}])                One document by id.
+  db.<bucket>.list([{…}])                       Documents, a page at a time.
+  db.<bucket>.count([{…}])                      How many documents.
+
+Write Operations:
+  db.<bucket>.insert({…})                       Add a document.
+  db.<bucket>.upsert({…})                       Add, or replace the same _id_.
+  db.<bucket>.update({…})                       Change some of its fields.
+  db.<bucket>.delete({…})                       Remove it and its stores.
+
+Store Fields (each document's own; help types):
+  db.<bucket>["<id>"].<storeField>.<verb>([…])  push pop peek list count sum
+                                                describe nearest take put inc
+                                                claim ack release extend get
+
+User Management:
+  create user <name> [roles [<role>@<db>, …]]   Create a user.
+  alter user <name> disable|enable|password     Block, unblock, new password.
+  alter user <name> roles [<role>@<db>, …]      Replace a user's roles.
+  drop user <name>                              Delete a user.
+  grant role <role>@<db> to <user>              Add one grant.
+  revoke role <role>@<db> from <user>           Remove one grant.
+  show users                                    Users, roles and status.
+  user list                                     The same as show users.
+  user describe <name>                          One user's roles and status.
+
+Cluster Management:
+  join <node>@<host:port>                       Register a running node.
+  promote <node>                                Make a member a voter.
+  replace-node <node> --with <node>@<host:port> [--accept-loss]
+                                                Reseed a node that lost data.
+  nodes                                         List the members.
+  status seeding [<db> [<slot>]]                Slot pulls in progress.
+  status                                        Epoch, leader and lease.
+  seeding retry <db> <slot>                     Restart one slot's pull.
+  seeding forget <db> <slot> [anyway]           Drop a retired slot's record.
+
+Session Commands:
+  use <database>                                Work inside a database.
+  show banner                                   Draw the node summary again.
+  set <setting> [on|off]                        pretty, extjson or pager.
+  help [<topic>]                                Quick Start, or one statement.
+  exit                                          Leave; quit works too.
+
+Not available yet:
+  alter database, drop database, leave, remove-node, show placement,
+  show replication
+[h]oardDB> help create
+create — make a database or a bucket
+====================================
+
+Create a database:
+  create database <name> [{ <options> }]
+
+  create database app                            One copy (this node's default).
+  create database app { replication_factor: 1 }  Say how many copies.
+
+  Options: { replication_factor: <n>, storage: disk }. More than one copy
+  needs that many data nodes: a factor the cluster cannot hold is refused
+  before anything is written. Every database is kept on disk in this build.
+
+Create a bucket:
+  create bucket <name> [in <db>] { <Field> <type>, … }
+
+  create bucket User { Name string, Purchases fifoStore }
+  create bucket Order in shop { Total double, Lines fifoStore, Notes hashStore }
+
+  Declare every field. A field is a scalar (string, int, double, bool,
+  datetime, …) or a store, and a store belongs to each document: every User
+  has its own Purchases queue. A store keeps a sum or a count current when
+  you add with (sum Total, count by Status) after it. Not built yet, so
+  refused: index <IndexName> ( <Field> [desc] ). All the words: help types.
+  Like SQL CREATE TABLE, except a field can be a store each row owns.
+
+Also: help create user.
+
+Next: use app, then db.User.insert({_id_: "ada", Name: "Ada"})
+[h]oardDB> help db
+db — documents and their stores
+===============================
+
+Every document statement starts with db.<bucket> and runs in the database
+'use' selected. A document's id is its _id_ field.
+
+One document:
+  db.<bucket>["<id>"].get([{…}])                One document by id.
+  db.<bucket>.insert({…})                       Add a document.
+  db.<bucket>.upsert({…})                       Add, or replace the same _id_.
+  db.<bucket>.update({…})                       Change some of its fields.
+  db.<bucket>.delete({…})                       Remove it and its stores.
+Many documents:
+  db.<bucket>.list([{…}])                       Documents, a page at a time.
+  db.<bucket>.count([{…}])                      How many documents.
+A document's own stores:
+  db.<bucket>["<id>"].<storeField>.<verb>([…])  push, pop, peek, claim, put, …
+
+  db.User.insert({_id_: "ada", Name: "Ada"})
+  db.User["ada"].get()
+  db.User.list({filter: {Name: "Ada"}, limit: 10})
+  db.User["ada"].Purchases.push({Item: "coffee"})
+
+Coming from a document store: find({_id_: "ada"}) is db.User["ada"].get();
+find({…}) is db.User.list({filter: {…}}). A store field is written through
+its own verb.
+Next: help insert, help list, help push.
+[h]oardDB> help set
+set — change how results print
+==============================
+
+  set <setting> [on|off]
+
+  set pretty on
+  set extjson
+  set pager off
+
+  Change how output is printed: pretty (several lines per document), extjson
+  (dates as {"$date": ...}) or pager (a screen at a time). 'set pretty' on
+  its own says what it is.
+[h]oardDB> help nothing
+Error: no help for "nothing". Topics: create, alter, drop, show, describe, db, get, list, count, insert, upsert, update, delete, grant, revoke, user, join, promote, replace-node, nodes, status, seeding, use, set, help, push, pop, peek, sum, nearest, take, put, inc, claim, ack, release, extend, types, all. Run 'help' for the first five minutes, or 'help all' for every statement.

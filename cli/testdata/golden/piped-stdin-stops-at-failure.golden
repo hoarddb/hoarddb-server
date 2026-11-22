@@ -1,0 +1,8 @@
+hoardDB CLI <VERSION>
+Type 'help' for help, 'exit' to quit.
+
+Switched to database 'app'
+2
+{"_id_": "u1", "n": 1}
+{"_id_": "<ID>", "task": "x"}
+returned error: count failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

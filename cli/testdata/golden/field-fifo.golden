@@ -1,0 +1,23 @@
+> db.Post["p1"].Comments.push({"by": "bob"})
+OK
+> db.Post["p1"].Comments.peek()
+{"_id_": "<ID>", "by": "ada"}
+> db.Post["p1"].Comments.peek({limit: 2})
+{"_id_": "<ID>", "by": "ada"}
+{"_id_": "<ID>", "by": "bob"}
+> db.Post["p1"].Comments.len()
+2
+> db.Post["p1"].Comments.list({limit: 10})
+{"_id_": "<ID>", "by": "ada"}
+{"_id_": "<ID>", "by": "bob"}
+> db.Post["p1"].Comments.pop()
+{"_id_": "<ID>", "by": "ada"}
+> db.Post["p1"].Comments.pop()
+{"_id_": "<ID>", "by": "bob"}
+> db.Post["p1"].Comments.pop()
+EMPTY
+> db.Post["p1"].Comments.peek()
+EMPTY
+> db.Post["p1"].Comments.len()
+0
+> db.Post["p1"].Comments.list()

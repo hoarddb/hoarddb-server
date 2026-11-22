@@ -1,0 +1,355 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "app": {
+      "description": "the application name, for the plan heading",
+      "type": "string"
+    },
+    "fans": {
+      "description": "children per parent, such as containers per principal",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "child": {
+            "type": "string"
+          },
+          "max": {
+            "type": "integer"
+          },
+          "p50": {
+            "type": "integer"
+          },
+          "p95": {
+            "type": "integer"
+          },
+          "parent": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "parent",
+          "child",
+          "p50",
+          "p95",
+          "max"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "kinds": {
+      "description": "one per source collection or table",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "documents": {
+            "description": "documents in the source",
+            "type": "integer"
+          },
+          "expire_whole": {
+            "description": "the whole collection expires",
+            "type": "boolean"
+          },
+          "fields": {
+            "description": "every field of the kind",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "array": {
+                  "additionalProperties": false,
+                  "description": "facts about an array field",
+                  "properties": {
+                    "elem_is_document": {
+                      "type": "boolean"
+                    },
+                    "key_distinct_permille": {
+                      "type": "integer"
+                    },
+                    "key_field": {
+                      "type": "string"
+                    },
+                    "key_is_time": {
+                      "type": "boolean"
+                    },
+                    "len_max": {
+                      "type": "integer"
+                    },
+                    "len_p50": {
+                      "type": "integer"
+                    },
+                    "len_p95": {
+                      "type": "integer"
+                    },
+                    "monotone_permille": {
+                      "type": "integer"
+                    },
+                    "order_field": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "len_p50",
+                    "len_p95",
+                    "len_max",
+                    "elem_is_document"
+                  ],
+                  "type": "object"
+                },
+                "bytes_p50": {
+                  "description": "median size in bytes",
+                  "type": "integer"
+                },
+                "distinct_permille": {
+                  "description": "share of distinct values, 0 to 1000",
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "present_permille": {
+                  "description": "share of documents that carry the field, 0 to 1000",
+                  "type": "integer"
+                },
+                "ref": {
+                  "additionalProperties": false,
+                  "description": "the field holds the key of another kind",
+                  "properties": {
+                    "resolve_permille": {
+                      "type": "integer"
+                    },
+                    "to": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "to",
+                    "resolve_permille"
+                  ],
+                  "type": "object"
+                },
+                "role": {
+                  "description": "counter, period, ttl_at or soft_delete",
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "type",
+                "present_permille"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "indexes": {
+            "description": "indexes the source declares, each a list of field names",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sampled": {
+            "description": "documents the counts were taken from",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "documents",
+          "sampled",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "links": {
+      "description": "link tables read from both sides",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "a",
+          "b"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "source": {
+      "description": "dump, hand or agent",
+      "type": "string"
+    },
+    "trace": {
+      "description": "the access trace: what the application does with the data",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "atomic_with": {
+            "description": "a group name: writes one transaction performs together",
+            "type": "string"
+          },
+          "by": {
+            "description": "fields the operation selects on; _id is a read by key",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bytes_p50": {
+            "description": "for put: the usual size of the bytes",
+            "type": "integer"
+          },
+          "coll": {
+            "description": "a kind name from the model",
+            "type": "string"
+          },
+          "dynamic": {
+            "description": "the dimension or segment is chosen at run time",
+            "type": "boolean"
+          },
+          "filters": {
+            "description": "filters a list composes at run time",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "field": {
+                  "description": "the filter field",
+                  "type": "string"
+                },
+                "optional": {
+                  "description": "true when the filter is composed at run time",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "field"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "guard": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "an update that runs only if a field holds a value",
+            "type": "object"
+          },
+          "inc": {
+            "description": "fields an update increments by hand",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "join": {
+            "additionalProperties": false,
+            "description": "a join edge: to, on and kind",
+            "properties": {
+              "kind": {
+                "description": "pk, nonkey, visibility, aggregate or sort",
+                "type": "string"
+              },
+              "on": {
+                "description": "the field joined on",
+                "type": "string"
+              },
+              "to": {
+                "description": "the kind joined to",
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "on",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "key": {
+            "description": "for range: the field whose range is read",
+            "type": "string"
+          },
+          "limit": {
+            "description": "the usual page size",
+            "type": "integer"
+          },
+          "op": {
+            "description": "what the application does: get, list, range, insert, update, delete, take, put, join, aggregate or search",
+            "type": "string"
+          },
+          "order": {
+            "description": "for take: oldest, newest or priority:\u003cfield\u003e",
+            "type": "string"
+          },
+          "sort": {
+            "description": "field:asc or field:desc",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sort_from": {
+            "description": "who chooses the sort: client, fixed or setting",
+            "type": "string"
+          },
+          "substring": {
+            "description": "a substring, regex or full-text match; fails rule 1 unless a search line delegates it",
+            "type": "boolean"
+          },
+          "surface": {
+            "description": "primary (default) or admin; admin lines earn at most a partial",
+            "type": "string"
+          },
+          "visibility": {
+            "description": "owner, membership, container, object_scoped or object_global",
+            "type": "string"
+          },
+          "weight": {
+            "description": "how often, relative to a line with no weight; 0 means 1",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op",
+          "coll"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "must be 1",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "source",
+    "kinds"
+  ],
+  "title": "hoarddb plan model file",
+  "type": "object"
+}

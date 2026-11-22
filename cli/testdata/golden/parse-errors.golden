@@ -1,0 +1,16 @@
+> db.Users.
+Error: parse: expected parentheses for method call: db.Users.
+> count Users
+Error: parse: unknown command: count
+> db.Users.foo()
+Error: unknown bucket method "foo" — run 'help' for the supported operations
+> FROM x
+Error: parse: unknown command: from
+> db.Users.find(
+Error: parse: parse args: expected parentheses, got: (
+> use app extra
+Error: parse: usage: use <database> takes one name (got "app extra")
+> create bucket
+Error: parse: usage: create bucket <name> { type: hash | btree | fifo | lifo | heap | blob }
+> show nothing
+Error: parse: unknown show target: nothing (use databases, buckets, users, or banner)

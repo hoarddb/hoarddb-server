@@ -1,0 +1,66 @@
+{
+ "app-04": {
+  "cells": "PPPPP",
+  "verdict": "yes with caveats"
+ },
+ "app-10": {
+  "cells": "pPPPP",
+  "verdict": "yes with caveats"
+ },
+ "app-12": {
+  "cells": "FPppP",
+  "verdict": "only with redesign of dynamic filters"
+ },
+ "app-09": {
+  "cells": "FFFPp",
+  "verdict": "only with redesign of dynamic filters, client sorting, non-reducible joins"
+ },
+ "app-02": {
+  "cells": "pPPFp",
+  "verdict": "only with redesign of permissions in the query"
+ },
+ "app-15": {
+  "cells": "FppFP",
+  "verdict": "only with redesign of dynamic filters, permissions in the query"
+ },
+ "app-11": {
+  "cells": "PPPFp",
+  "verdict": "only with redesign of permissions in the query"
+ },
+ "app-14": {
+  "cells": "FppFP",
+  "verdict": "only with redesign of dynamic filters, permissions in the query"
+ },
+ "app-08": {
+  "cells": "FpFFF",
+  "verdict": "only with redesign of dynamic filters, non-reducible joins, permissions in the query, atomic multi-entity writes"
+ },
+ "app-06": {
+  "cells": "FppPP",
+  "verdict": "only with redesign of dynamic filters"
+ },
+ "app-01": {
+  "cells": "FFpPP",
+  "verdict": "only with redesign of dynamic filters, client sorting"
+ },
+ "app-16": {
+  "cells": "FFFFP",
+  "verdict": "not a good candidate for hoardDB"
+ },
+ "app-13": {
+  "cells": "FFFFF",
+  "verdict": "not a good candidate for hoardDB"
+ },
+ "app-03": {
+  "cells": "FFFFF",
+  "verdict": "not a good candidate for hoardDB"
+ },
+ "app-05": {
+  "cells": "FFFFF",
+  "verdict": "not a good candidate for hoardDB"
+ },
+ "app-07": {
+  "cells": "FpFpp",
+  "verdict": "not a good candidate for hoardDB"
+ }
+}

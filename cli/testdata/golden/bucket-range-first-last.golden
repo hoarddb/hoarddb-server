@@ -1,0 +1,19 @@
+> db.Events.range({$gte: "a", $lte: "z"})
+1 entry in range:
+  e5                   {"_id_": "e5", "kind": "click"}
+> db.Events.range({$gte: "x", $lte: "z"})
+(no entries in range)
+> db.Events.range({"from": 1, "to": 9})
+Error: range needs bounds: db.Events.range({$gte: "a", $lte: "z"})
+> db.Events.first()
+first: e5
+{"_id_": "e5", "kind": "click"}
+> db.Events.last()
+last: e5
+{"_id_": "e5", "kind": "click"}
+> db.Users.first()
+Error: first failed: server error (4): bucket "Users" is type hash; this operation requires type btree. A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.
+> db.Events.delete("e5")
+OK  deleted "e5"
+> db.Events.first()
+Error: bucket "Events" is empty — insert a document first

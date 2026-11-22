@@ -1,0 +1,14 @@
+> status
+STATUS
+---
+Node ID:      
+Version:      devel
+Uptime:       <UPTIME>
+Buckets:      7
+Healthy:      true
+Memtable:     <MEMTABLE> MiB  chosen at first start from <MEMORY> memory; largest atomic batch <BATCH> MB
+Capacity:
+  fds         <RATIO>  threshold 0.80  ok
+  mappings    <RATIO>  threshold 0.80  ok
+  memory      <RATIO>  threshold 0.80  ok
+  disk        <RATIO>  threshold 0.85  ok

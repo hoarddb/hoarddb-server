@@ -1,0 +1,19 @@
+> db.Jobs.peek()
+{"_id_": "<ID>", "task": "x"}
+> db.Tasks.peek()
+{"_id_": "<ID>", "task": "t"}
+> db.Jobs.peek(2)
+Error: peek(2) is not supported: the count goes in an option document.
+       Use db.Jobs.peek({limit: 2}) to read the next 2 without removing them.
+> db.Jobs.pop()
+{"_id_": "<ID>", "task": "x"}
+> db.Jobs.peek()
+EMPTY  queue is empty
+> db.Tasks.pop()
+{"_id_": "<ID>", "task": "t"}
+> db.Tasks.peek()
+EMPTY  heap is empty
+> db.Users.peek()
+Error: peek failed: server error (4): peek is not defined for hash buckets: a hash has no order to take from, so there is no "next" to look at. Read one with get("<key>") or several with find(). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.
+> db.Nope.peek()
+Error: peek failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

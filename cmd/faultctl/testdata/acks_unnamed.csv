@@ -1,0 +1,6 @@
+client,id,seq,pos_epoch,pos_seq,outcome,copies,served_by,via,at_ns,err_code
+a,a-0,0,1,1,applied,1,n1,192.0.2.1:7433,1000,
+a,a-1,1,1,2,applied,1,n1,192.0.2.1:7433,2000,
+a,a-2,2,1,3,applied,1,n1,192.0.2.1:7433,3000,
+a,a-3,3,0,0,,0,,192.0.2.1:7433,4000,TIMEOUT
+b,b-0,0,1,4,applied,1,n1,192.0.2.1:7433,1500,

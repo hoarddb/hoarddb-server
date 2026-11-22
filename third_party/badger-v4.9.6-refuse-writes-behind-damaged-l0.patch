@@ -1,0 +1,231 @@
+diff --git a/db.go b/db.go
+index f44e41af..45764837 100644
+--- a/db.go
++++ b/db.go
+@@ -15,6 +15,10 @@
+  * Modified by the hoardDB project, 2026-10-18: Close does not wait for a level-0
+  * compaction that cannot succeed (ErrL0StalledByDamagedTable). See
+  * hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-10-19: a write that would wait for room
++ * behind a level 0 held at its stall limit by a damaged table is refused,
++ * naming the table. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -1159,7 +1163,18 @@ func (db *DB) WriteRefusal() error {
+ 	if refusal := db.rotateRefusal.Load(); refusal != nil {
+ 		return *refusal
+ 	}
+-	return nil
++	return db.lc.damagedStallRefusal()
++}
++
++// wakeBlockedWriters wakes a writer waiting in ensureRoomForWrite so it re-checks
++// whether it should be refused. It takes db.lock because the waiter releases it
++// only inside flushCond.Wait.
++func (db *DB) wakeBlockedWriters() {
++	db.lock.Lock()
++	defer db.lock.Unlock()
++	if db.flushCond != nil {
++		db.flushCond.Broadcast()
++	}
+ }
+ 
+ // ensureRoomForWrite is always called serially. It blocks (without busy-polling)
+@@ -1222,6 +1237,12 @@ func (db *DB) ensureRoomForWrite() error {
+ 				next.DecrRef()
+ 				return *refusal
+ 			}
++			// The flusher is waiting for a level-0 compaction that cannot
++			// succeed: refuse rather than wait for it (BUG-0381).
++			if refusal := db.lc.damagedStallRefusal(); refusal != nil {
++				next.DecrRef()
++				return refusal
++			}
+ 			db.flushCond.Wait()
+ 		}
+ 	}
+diff --git a/levels.go b/levels.go
+index 6cc99720..1039cfcd 100644
+--- a/levels.go
++++ b/levels.go
+@@ -9,6 +9,10 @@
+  * Modified by the hoardDB project, 2026-10-18: Close reports a level 0 held at
+  * its stall limit by a compaction that cannot read a table. See
+  * hoardDB/third_party/README.md.
++ *
++ * Modified by the hoardDB project, 2026-10-19: a write that would wait for room
++ * behind a level 0 held at its stall limit by a damaged table is refused,
++ * naming the table. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -1656,6 +1660,9 @@ func (s *levelsController) doCompact(id int, p compactionPriority) error {
+ 		if _, blockFailure, found := strings.Cut(err.Error(), table.ErrBlockRead.Error()); found {
+ 			blockFailure = table.ErrBlockRead.Error() + blockFailure
+ 			s.unreadableTableFailure.Store(&blockFailure)
++			// A writer waiting in ensureRoomForWrite re-checks for this record
++			// when woken, and would otherwise wait for room no compaction makes.
++			s.kv.wakeBlockedWriters()
+ 		}
+ 		return err
+ 	}
+@@ -1740,6 +1747,25 @@ func (s *levelsController) stalledByUnreadableTable() error {
+ 		ErrL0StalledByDamagedTable, s.l0TablesForcedAtClose.Load(), s.kv.opt.NumLevelZeroTablesStall, *failure)
+ }
+ 
++// damagedStallRefusal returns the error a write is refused with when level 0
++// is at its stall limit and a compaction has failed on a table block it could
++// not read, or nil. Both are required: the record alone is a damaged table
++// somewhere in the tree, and the limit alone is a flush that is only slow, which
++// is never refused (BUG-0381).
++func (s *levelsController) damagedStallRefusal() error {
++	failure := s.unreadableTableFailure.Load()
++	if failure == nil {
++		return nil
++	}
++	tables := s.levels[0].numTables()
++	if tables < s.kv.opt.NumLevelZeroTablesStall {
++		return nil
++	}
++	return fmt.Errorf("%w: %w: level 0 holds %d tables, its stall limit is %d, and every compaction that "+
++		"includes the damaged table fails and keeps it (%s)",
++		ErrWritesRefused, ErrL0StalledByDamagedTable, tables, s.kv.opt.NumLevelZeroTablesStall, *failure)
++}
++
+ func (s *levelsController) close() error {
+ 	err := s.cleanupLevels()
+ 	return y.Wrap(err, "levelsController.Close")
+diff --git a/stalled_write_test.go b/stalled_write_test.go
+new file mode 100644
+index 00000000..09bcab05
+--- /dev/null
++++ b/stalled_write_test.go
+@@ -0,0 +1,126 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package badger
++
++import (
++	"os"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++// stalledWriter writes new keys in a loop and reports the error that ends it.
++type stalledWriter struct {
++	committed atomic.Int64
++	failed    chan error
++}
++
++func startStalledWriter(db *DB) *stalledWriter {
++	writer := &stalledWriter{failed: make(chan error, 1)}
++	go func() {
++		for index := 2 * corruptBlockEntries; ; index++ {
++			err := db.Update(func(txn *Txn) error {
++				return txn.Set(corruptBlockKey(index), corruptBlockValue(index))
++			})
++			if err != nil {
++				writer.failed <- err
++				return
++			}
++			writer.committed.Add(1)
++		}
++	}()
++	return writer
++}
++
++// stalledStoreOptions is two level-0 tables at a stall limit of two, one slot
++// for a flushing memtable and a 1 MiB memtable, with the compactors off so the
++// test chooses when a compaction runs.
++func stalledStoreOptions(dir string) Options {
++	return corruptBlockOptions(dir).WithNumLevelZeroTables(1).WithNumLevelZeroTablesStall(2).
++		WithNumMemtables(2).WithMemTableSize(1 << 20).WithValueThreshold(1 << 10)
++}
++
++func openStalledStore(t *testing.T, damage bool) (*DB, string) {
++	t.Helper()
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	t.Cleanup(func() { removeDir(dir) })
++	writeTable(t, dir, 0, corruptBlockEntries)
++	writeTable(t, dir, corruptBlockEntries, 2*corruptBlockEntries)
++	tablePaths := tablesIn(t, dir)
++	require.Len(t, tablePaths, 2)
++	if damage {
++		flipByte(t, tablePaths[0])
++	}
++	db, err := Open(stalledStoreOptions(dir))
++	require.NoError(t, err)
++	return db, tablePaths[0]
++}
++
++// waitUntilWritesStop returns once more than 1000 writes have committed and
++// none has for a second, which is a writer blocked in ensureRoomForWrite.
++func waitUntilWritesStop(t *testing.T, writer *stalledWriter) {
++	t.Helper()
++	lastCount, lastChange := int64(-1), time.Now()
++	for deadline := time.Now().Add(time.Minute); ; {
++		require.True(t, time.Now().Before(deadline), "the writes never stopped")
++		if count := writer.committed.Load(); count != lastCount {
++			lastCount, lastChange = count, time.Now()
++		} else if count > 1000 && time.Since(lastChange) > time.Second {
++			return
++		}
++		time.Sleep(20 * time.Millisecond)
++	}
++}
++
++// TestAWriteBlockedBehindACorruptBlockIsRefusedNamingTheTable is BUG-0381's
++// write half: with level 0 at its stall limit and a recorded compaction failure
++// on an unreadable block, a write that would wait for room is refused at once
++// with an error that names the table, instead of waiting for a compaction that
++// cannot succeed.
++func TestAWriteBlockedBehindACorruptBlockIsRefusedNamingTheTable(t *testing.T) {
++	db, damagedTable := openStalledStore(t, true)
++	defer func() { _ = db.Close() }() // the close error is TestCloseOfAStoreStalled...'s subject
++	require.Error(t, db.lc.doCompact(0, compactionPriority{level: 0, score: 1.71, adjusted: 1.71}))
++
++	writer := startStalledWriter(db)
++	select {
++	case writeErr := <-writer.failed:
++		require.ErrorIs(t, writeErr, ErrWritesRefused)
++		require.ErrorIs(t, writeErr, ErrL0StalledByDamagedTable)
++		require.Contains(t, writeErr.Error(), damagedTable)
++		require.ErrorIs(t, db.WriteRefusal(), ErrL0StalledByDamagedTable)
++	case <-time.After(time.Minute):
++		t.Fatal("a write behind a corrupt level-0 table was not refused within 1m")
++	}
++}
++
++// TestAWriteBlockedByASlowFlushOfAHealthyStoreIsNeverRefused: the same store
++// without the damage reaches the same stall (no compaction has run), and its
++// writes wait. They are not refused, and they go on when a compaction drains
++// level 0.
++func TestAWriteBlockedByASlowFlushIsNeverRefusedWithoutACorruptBlock(t *testing.T) {
++	db, _ := openStalledStore(t, false)
++	defer func() { require.NoError(t, db.Close()) }()
++
++	writer := startStalledWriter(db)
++	waitUntilWritesStop(t, writer)
++	select {
++	case writeErr := <-writer.failed:
++		t.Fatalf("a write blocked behind a healthy level 0 was refused: %v", writeErr)
++	case <-time.After(2 * time.Second):
++	}
++	require.NoError(t, db.WriteRefusal())
++
++	stalledAt := writer.committed.Load()
++	require.NoError(t, db.lc.doCompact(0, compactionPriority{level: 0, score: 1.71, adjusted: 1.71}))
++	for deadline := time.Now().Add(time.Minute); writer.committed.Load() == stalledAt; {
++		require.True(t, time.Now().Before(deadline), "the writer did not go on after level 0 drained")
++		time.Sleep(20 * time.Millisecond)
++	}
++}

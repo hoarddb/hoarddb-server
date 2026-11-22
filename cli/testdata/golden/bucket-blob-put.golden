@@ -1,0 +1,8 @@
+> db.Files.put({"_id_": "f2", "data": "yo", "name": "yo.txt"})
+OK  key=f2  blob=<ID>  2 B
+> db.Files.count()
+2
+> db.Files.put({"data": "no key"})
+OK  key=<ID>  blob=<ID>  6 B
+> db.Users.put({"_id_": "k", "data": "x"})
+Error: put failed: server error (4): bucket "Users" is type hash; this operation requires type blob. A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.

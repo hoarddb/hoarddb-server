@@ -1,0 +1,366 @@
+{
+  "inputs": [
+    "source: dump; thresholds version 1",
+    "comments: 24,000 documents (24,000 sampled)",
+    "posts: 2,000 documents (2,000 sampled)",
+    "users: 200 documents (200 sampled)",
+    "trace: 4 lines"
+  ],
+  "scorecard": {
+    "rules": [
+      {
+        "number": 1,
+        "name": "dynamic filters",
+        "cell": "P",
+        "counts": "none found"
+      },
+      {
+        "number": 2,
+        "name": "client sorting",
+        "cell": "P",
+        "counts": "none found"
+      },
+      {
+        "number": 3,
+        "name": "non-reducible joins",
+        "cell": "P",
+        "counts": "none found"
+      },
+      {
+        "number": 4,
+        "name": "permissions in the query",
+        "cell": "P",
+        "counts": "none found"
+      },
+      {
+        "number": 5,
+        "name": "atomic multi-entity writes",
+        "cell": "P",
+        "counts": "none found"
+      }
+    ],
+    "verdict": "yes",
+    "decided_by": "No rule found a trace line to count against.",
+    "limits": [
+      "This verdict is built on what the inputs claim: the sample, the model and the trace. It does not see how often each read runs (only the `weight` you gave), which lines are on the admin surface (only the `surface` you gave), the counts and fans you supplied, or any query you left out. A line left out can only make the verdict kinder.",
+      "To change a verdict, change the design the trace describes and then update the trace. Editing a line to move a cell changes the claim, not the application."
+    ]
+  },
+  "reductions": [
+    {
+      "shape": "key read",
+      "source": "get users by _id",
+      "replacement": "db.User[\"\u003cid\u003e\"].get()",
+      "cost_class": "seek",
+      "lines": [
+        1
+      ]
+    },
+    {
+      "shape": "child rows by parent key, ordered",
+      "source": "list comments by post_id sort ts:asc limit 20",
+      "replacement": "db.Post[\"\u003cid\u003e\"].Comments.list({limit: 20})  (fifoStore)",
+      "cost_class": "seek",
+      "lines": [
+        2
+      ]
+    },
+    {
+      "shape": "read across owners",
+      "source": "list comments by author_id sort ts:desc limit 10",
+      "replacement": "not served by the store field; choose the bucket design",
+      "cost_class": "scan",
+      "needs": "indexes (not available yet)",
+      "lines": [
+        4
+      ]
+    }
+  ],
+  "suggestions": [
+    {
+      "name": "Post",
+      "sources": [
+        "posts"
+      ],
+      "fields": [
+        {
+          "name": "AuthorId",
+          "type": "string",
+          "source": "author_id"
+        },
+        {
+          "name": "Body",
+          "type": "string",
+          "source": "body"
+        },
+        {
+          "name": "CreatedAt",
+          "type": "datetime",
+          "source": "created_at"
+        },
+        {
+          "name": "Tags",
+          "type": "array",
+          "source": "tags"
+        },
+        {
+          "name": "Title",
+          "type": "string",
+          "planned": "unique",
+          "source": "title"
+        }
+      ],
+      "store_fields": [
+        {
+          "name": "Comments",
+          "store": "fifoStore",
+          "source": "comments",
+          "placement_alternatives": [
+            "bucket Comment",
+            "both: Comments and a Comment bucket written twice"
+          ],
+          "grade": "conflict",
+          "evidence": [
+            {
+              "detector": "S1",
+              "kind": "comments",
+              "field": "_id",
+              "pattern": "P1",
+              "note": "comments has _id in every sampled document: the key"
+            },
+            {
+              "detector": "S5",
+              "kind": "comments",
+              "field": "author_id",
+              "pattern": "P9",
+              "other": "users",
+              "note": "comments.author_id refers to users (1000 per mille resolve)"
+            },
+            {
+              "detector": "T6",
+              "kind": "comments",
+              "field": "author_id",
+              "pattern": "P8",
+              "lines": [
+                4
+              ],
+              "note": "trace line 4 reads comments by author_id: a read across owners, so a bucket"
+            },
+            {
+              "detector": "S5",
+              "kind": "comments",
+              "field": "post_id",
+              "pattern": "P9",
+              "other": "posts",
+              "note": "comments.post_id refers to posts (999 per mille resolve)"
+            },
+            {
+              "detector": "S6",
+              "kind": "comments",
+              "field": "post_id",
+              "pattern": "P2/P3/P4/P5",
+              "other": "posts",
+              "note": "comments refers only to posts through post_id (999 per mille resolve) and nothing refers to comments: a candidate owned collection of posts"
+            },
+            {
+              "detector": "T2",
+              "kind": "comments",
+              "field": "post_id",
+              "pattern": "P2",
+              "other": "posts",
+              "lines": [
+                2
+              ],
+              "note": "trace line 2 lists comments within one document of posts sorted ts:asc"
+            }
+          ]
+        }
+      ],
+      "grade": "conflict",
+      "evidence": [
+        {
+          "detector": "S1",
+          "kind": "posts",
+          "field": "_id",
+          "pattern": "P1",
+          "note": "posts has _id in every sampled document: the key"
+        },
+        {
+          "detector": "S5",
+          "kind": "posts",
+          "field": "author_id",
+          "pattern": "P9",
+          "other": "users",
+          "note": "posts.author_id refers to users (1000 per mille resolve)"
+        },
+        {
+          "detector": "S1",
+          "kind": "posts",
+          "field": "title",
+          "pattern": "P8",
+          "note": "posts.title is distinct in every sampled document (present in 1000 per mille): unique"
+        }
+      ],
+      "open": [
+        "comments.placement"
+      ]
+    },
+    {
+      "name": "User",
+      "sources": [
+        "users"
+      ],
+      "fields": [
+        {
+          "name": "Email",
+          "type": "string",
+          "planned": "unique",
+          "source": "email"
+        },
+        {
+          "name": "Name",
+          "type": "string",
+          "planned": "unique",
+          "source": "name"
+        }
+      ],
+      "store_fields": [
+        {
+          "name": "Avatar",
+          "store": "blobStore",
+          "source": "users.avatar",
+          "alternatives": [
+            "the pointer layout of large-files.md"
+          ],
+          "grade": "shape",
+          "evidence": [
+            {
+              "detector": "S4",
+              "kind": "users",
+              "field": "avatar",
+              "pattern": "P7",
+              "note": "users.avatar is 180000 bytes at the median, at or above the 65536-byte blob boundary"
+            }
+          ]
+        }
+      ],
+      "grade": "trace",
+      "evidence": [
+        {
+          "detector": "S1",
+          "kind": "users",
+          "field": "_id",
+          "pattern": "P1",
+          "note": "users has _id in every sampled document: the key"
+        },
+        {
+          "detector": "T1",
+          "kind": "users",
+          "field": "_id",
+          "pattern": "P1",
+          "lines": [
+            1
+          ],
+          "note": "trace line 1 reads users by _id"
+        },
+        {
+          "detector": "S4",
+          "kind": "users",
+          "field": "avatar",
+          "pattern": "P7",
+          "note": "users.avatar is 180000 bytes at the median, at or above the 65536-byte blob boundary"
+        },
+        {
+          "detector": "S1",
+          "kind": "users",
+          "field": "email",
+          "pattern": "P8",
+          "note": "users.email is distinct in every sampled document (present in 1000 per mille): unique"
+        },
+        {
+          "detector": "S1",
+          "kind": "users",
+          "field": "name",
+          "pattern": "P8",
+          "note": "users.name is distinct in every sampled document (present in 1000 per mille): unique"
+        }
+      ]
+    }
+  ],
+  "wont_port": [],
+  "cost": [
+    {
+      "design": "Design A (as suggested)",
+      "buckets": 2,
+      "store_fields": 2,
+      "retired_fields": 0,
+      "declaration_bytes": 924,
+      "documents": 2200,
+      "approximate": false,
+      "store_elements": 24000,
+      "keys_per_document": "Post 1+5+12, User 1+2+0",
+      "scans_today": [
+        "not possible with the store field: list comments by author_id sort ts:desc limit 10 (weight 1)"
+      ]
+    },
+    {
+      "design": "Design B (each conflict as its own bucket)",
+      "buckets": 3,
+      "store_fields": 1,
+      "retired_fields": 0,
+      "declaration_bytes": 1334,
+      "documents": 26200,
+      "approximate": false,
+      "store_elements": 0,
+      "keys_per_document": "Post 1+5+0, User 1+2+0",
+      "scans_today": [
+        "scan of every comments document: list comments by post_id sort ts:asc limit 20 (weight 10)",
+        "scan: list comments by author_id sort ts:desc limit 10 (weight 1)"
+      ]
+    },
+    {
+      "design": "Design C (both: store field and bucket, written twice)",
+      "buckets": 3,
+      "store_fields": 2,
+      "retired_fields": 0,
+      "declaration_bytes": 1360,
+      "documents": 26200,
+      "approximate": false,
+      "store_elements": 24000,
+      "keys_per_document": "Post 1+5+12, User 1+2+0",
+      "scans_today": [
+        "scan of every comments document: list comments by post_id sort ts:asc limit 20 (weight 10)",
+        "scan: list comments by author_id sort ts:desc limit 10 (weight 1)"
+      ]
+    }
+  ],
+  "hql": [
+    {
+      "heading": "Post",
+      "text": "create bucket Post { AuthorId string, Body string, CreatedAt datetime, Tags array, Title string, Comments fifoStore }",
+      "marks": [
+        "-- not available yet: unique Title (a unique field cannot be declared at create)"
+      ],
+      "alternative": false
+    },
+    {
+      "heading": "Comment (alternative: Comments as its own bucket)",
+      "text": "create bucket Comment { AuthorId string, Body string, PostId string, Ts datetime }",
+      "marks": [
+        "-- instead of the Comments field above; with both, keep Post and add this bucket",
+        "-- not available yet: index Comment.AuthorId (list filters scan)"
+      ],
+      "alternative": true
+    },
+    {
+      "heading": "User",
+      "text": "create bucket User { Email string, Name string, Avatar blobStore }",
+      "marks": [
+        "-- cannot be written on this build: blobStore has no put yet; alternative: the pointer layout of large-files.md",
+        "-- not available yet: unique Email (a unique field cannot be declared at create)",
+        "-- not available yet: unique Name (a unique field cannot be declared at create)"
+      ],
+      "alternative": false
+    }
+  ]
+}

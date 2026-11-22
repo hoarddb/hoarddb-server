@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "source": "dump",
+  "app": "blog",
+  "kinds": [
+    {
+      "name": "comments",
+      "documents": 24000,
+      "sampled": 24000,
+      "fields": [
+        {
+          "name": "_id",
+          "type": "objectid",
+          "present_permille": 1000,
+          "distinct_permille": 170,
+          "bytes_p50": 12
+        },
+        {
+          "name": "author_id",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 8,
+          "bytes_p50": 9,
+          "ref": {
+            "to": "users",
+            "resolve_permille": 1000
+          }
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "present_permille": 1000,
+          "bytes_p50": 17
+        },
+        {
+          "name": "post_id",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 83,
+          "bytes_p50": 10,
+          "ref": {
+            "to": "posts",
+            "resolve_permille": 999
+          }
+        },
+        {
+          "name": "ts",
+          "type": "datetime",
+          "present_permille": 1000,
+          "distinct_permille": 170,
+          "bytes_p50": 8
+        }
+      ]
+    },
+    {
+      "name": "posts",
+      "documents": 2000,
+      "sampled": 2000,
+      "fields": [
+        {
+          "name": "_id",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 1000,
+          "bytes_p50": 10
+        },
+        {
+          "name": "author_id",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 100,
+          "bytes_p50": 9,
+          "ref": {
+            "to": "users",
+            "resolve_permille": 1000
+          }
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 4,
+          "bytes_p50": 137
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "present_permille": 1000,
+          "distinct_permille": 1000,
+          "bytes_p50": 8
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "present_permille": 1000,
+          "array": {
+            "len_p50": 3,
+            "len_p95": 5,
+            "len_max": 5,
+            "elem_is_document": false
+          }
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 1000,
+          "bytes_p50": 14
+        }
+      ]
+    },
+    {
+      "name": "users",
+      "documents": 200,
+      "sampled": 200,
+      "fields": [
+        {
+          "name": "_id",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 1000,
+          "bytes_p50": 9
+        },
+        {
+          "name": "avatar",
+          "type": "binary",
+          "present_permille": 1000,
+          "distinct_permille": 1000,
+          "bytes_p50": 180000
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 1000,
+          "bytes_p50": 25
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "present_permille": 1000,
+          "distinct_permille": 1000,
+          "bytes_p50": 15
+        }
+      ]
+    }
+  ]
+}

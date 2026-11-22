@@ -1,0 +1,109 @@
+diff --git a/memtable.go b/memtable.go
+index 161a463b..19f4e9e5 100644
+--- a/memtable.go
++++ b/memtable.go
+@@ -1,6 +1,9 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-07: logFile.doneWriting syncs the
++ * file whether or not SyncWrites is set. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -406,10 +409,12 @@ func (lf *logFile) generateIV(offset uint32) []byte {
+ }
+ 
+ func (lf *logFile) doneWriting(offset uint32) error {
+-	if lf.opt.SyncWrites {
+-		if err := lf.Sync(); err != nil {
+-			return y.Wrapf(err, "Unable to sync value log: %q", lf.path)
+-		}
++	// hoardDB: sync unconditionally. valueLog.sync (DB.Sync) syncs only the newest file, so
++	// this is the last sync a rotated file gets. The Truncate below syncs only when it changes
++	// the size, and a file that one request grew past its preallocation already ends at
++	// offset, so without this its tail is never synced when SyncWrites is off (BUG-0217).
++	if err := lf.Sync(); err != nil {
++		return y.Wrapf(err, "Unable to sync value log: %q", lf.path)
+ 	}
+ 
+ 	// Before we were acquiring a lock here on lf.lock, because we were invalidating the file
+diff --git a/db_sync_linux_test.go b/db_sync_linux_test.go
+index 0022840c..4e918b58 100644
+--- a/db_sync_linux_test.go
++++ b/db_sync_linux_test.go
+@@ -107,3 +107,73 @@ func TestSyncCoversImmutableMemtables(t *testing.T) {
+ 	require.Zero(t, after.Dirty, "dirty pages left in immutable memtable WAL %s after Sync", walPath)
+ 	require.Zero(t, after.Writeback, "pages under writeback in immutable memtable WAL %s after Sync", walPath)
+ }
++
++// TestSyncCoversAValueLogFileThatOutgrewItsPreallocation checks that a value-log
++// file which one request grew past its preallocation, and which then rotated, is
++// durable once DB.Sync returns (BUG-0217). Such a file already ends at the write
++// offset, so logFile.Truncate returned early without its msync, and DB.Sync
++// syncs only the newest file. It asks the kernel, as TestSyncCoversImmutableMemtables
++// does: no page of the rotated file may be dirty or under writeback.
++func TestSyncCoversAValueLogFileThatOutgrewItsPreallocation(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++
++	var fsStat unix.Statfs_t
++	require.NoError(t, unix.Statfs(dir, &fsStat))
++	if fsStat.Type == unix.TMPFS_MAGIC || fsStat.Type == unix.RAMFS_MAGIC {
++		t.Skip("tmpfs never writes back, so msync leaves its pages dirty; set TMPDIR to a disk")
++	}
++
++	const valueLogFileSize = 1 << 20
++	opt := getTestOptions(dir).
++		WithValueLogFileSize(valueLogFileSize).
++		WithValueThreshold(1 << 10)
++	db, err := Open(opt)
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++
++	db.vlog.filesLock.RLock()
++	firstFid := db.vlog.maxFid
++	db.vlog.filesLock.RUnlock()
++
++	// One transaction, one value-log request: 48 values of 128 KiB are 6 MiB,
++	// past the 2 MiB the file was preallocated at, so the file grows and then
++	// rotates inside that request.
++	require.NoError(t, db.Update(func(txn *Txn) error {
++		for i := range 48 {
++			if err := txn.Set([]byte(fmt.Sprintf("big-%03d", i)), make([]byte, 128<<10)); err != nil {
++				return err
++			}
++		}
++		return nil
++	}))
++
++	db.vlog.filesLock.RLock()
++	rotatedPath := db.vlog.filesMap[firstFid].Fd.Name()
++	rotatedSize := db.vlog.filesMap[firstFid].size.Load()
++	rotated := db.vlog.maxFid > firstFid
++	db.vlog.filesLock.RUnlock()
++	require.True(t, rotated, "the transaction did not rotate the value log")
++	require.Greater(t, rotatedSize, uint32(2*valueLogFileSize), "the file did not outgrow its preallocation")
++
++	pageCache := func() unix.Cachestat_t {
++		f, err := os.Open(rotatedPath)
++		require.NoError(t, err)
++		defer f.Close()
++		var cs unix.Cachestat_t
++		err = unix.Cachestat(uint(f.Fd()), &unix.CachestatRange{}, &cs, 0)
++		if errors.Is(err, unix.ENOSYS) {
++			t.Skip("cachestat(2) needs Linux 6.5 or later")
++		}
++		require.NoError(t, err)
++		return cs
++	}
++	t.Logf("rotated value-log file %s: %d bytes, %d dirty pages before Sync", rotatedPath, rotatedSize, pageCache().Dirty)
++
++	require.NoError(t, db.Sync())
++
++	after := pageCache()
++	require.Zero(t, after.Dirty, "dirty pages left in rotated value-log file %s after Sync", rotatedPath)
++	require.Zero(t, after.Writeback, "pages under writeback in rotated value-log file %s after Sync", rotatedPath)
++}

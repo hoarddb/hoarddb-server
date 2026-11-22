@@ -1,0 +1,63 @@
+> db.Work.claim({limit: 2, lease: "30s"})
+{"_id_": "<ID>", "n": 1}
+{"_id_": "<ID>", "n": 2}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>"]
+> db.Work.len()
+3  (plus 2 claimed)
+> db.Work.ack({lease_id: "{LEASE}", item_ids: ["{ITEM1}"]})
+acked 1, remaining 1
+> db.Work.ack({lease_id: "{LEASE}"})
+acked 1
+> db.Work.claim({limit: 100})
+{"_id_": "<ID>", "n": 3}
+{"_id_": "<ID>", "n": 4}
+{"_id_": "<ID>", "n": 5}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>", "<HANDLE>"]
+> db.Work.peek()
+EMPTY  queue is empty (3 entries are claimed; db.Work.len() does not count them)
+> db.Work.pop()
+EMPTY  queue is empty (3 entries are claimed; db.Work.len() does not count them)
+> db.Work.claim()
+EMPTY  queue is empty (3 entries are claimed; db.Work.len() does not count them)
+> db.Work.extend({lease_id: "{LEASE}", lease: "5m"})
+extended for 5m (until <TIMESTAMP>, bucket clock)
+> db.Work.release({lease_id: "{LEASE}"})
+released 3
+> db.Work.release({lease_id: "{LEASE}"})
+Error: lease <LEASE-ID> is unknown on app.Work: it was acknowledged, released or returned already, or app.Work did not issue it. Nothing was changed. Claim again with db.Work.claim()
+> db.Work.claim({limit: 100})
+{"_id_": "<ID>", "n": 3}
+{"_id_": "<ID>", "n": 4}
+{"_id_": "<ID>", "n": 5}
+lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>", "<HANDLE>", "<HANDLE>"]; deliveries [2, 2, 2]
+> db.Work.claim()
+EMPTY  queue is empty (3 entries are claimed; db.Work.len() does not count them)
+> db.Work.claim(3)
+Error: claim(3) is not supported: the options go in an option document.
+       Use db.Work.claim({limit: 10, lease: "30s"}).
+> db.Work.claim({bogus: true})
+Error: claim has the options limit and lease, and "bogus" is not one of them: db.Work.claim({limit: 10, lease: "30s"})
+> db.Work.claim({lease: 30})
+Error: claim's lease needs a unit, as in db.Work.claim({lease: "30s"}); got 30
+> db.Work.claim({lease: "2h"})
+Error: claim's lease "2h" is above the maximum of "1h": claim with lease "1h" and call db.Work.extend({lease_id: "<lease_id>", lease: "1h"}) while the work runs. Nothing was sent
+> db.Work.claim({lease: "500ms"})
+Error: claim's lease "500ms" is below the minimum of "1s": use "1s" or more. Nothing was sent
+> db.Work.claim({limit: 101})
+Error: claim failed: server error (4): invalid claim limit: 101 is above the claim maximum of 100. Claim takes at most 100 at a time: repeat db.Work.claim({limit: 100}), or read them without taking any with db.Work.peek({limit: 101})
+> db.Work.ack()
+Error: ack needs the lease_id claim returned, as in db.Work.ack({lease_id: "<lease_id>"}); claim prints it on the line that starts lease_id
+> db.Work.ack({lease_id: "nope"})
+Error: ack failed: server error (4): invalid lease: lease id "nope" is not a lease id (a lease id is 40 hex characters, this one is 4). A lease id is the 40 hexadecimal characters claim answered in lease_id: claim again with db.Work.claim() and use the lease_id it returns
+> db.Work.ack({lease_id: "<LEASE-ID>"})
+Error: lease <LEASE-ID> is unknown on app.Work: it was acknowledged, released or returned already, or app.Work did not issue it. Nothing was changed. Claim again with db.Work.claim()
+> db.Work.extend({lease_id: "{LEASE}"})
+Error: extend needs a lease, as in db.Work.extend({lease_id: "<lease_id>", lease: "60s"})
+> db.Users.claim()
+Error: claim failed: server error (4): claim is not defined for hash buckets: a hash has no order to take from. Read with get("<key>") or find(), and remove with delete("<key>"). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.
+> db.Users.ack({lease_id: "<LEASE-ID>"})
+Error: ack failed: server error (4): ack is not defined for hash buckets: only fifo, lifo and heap buckets issue leases. Read with get("<key>") or find(), and remove with delete("<key>"). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.
+> db.Post["p1"].Comments.claim()
+Error: claim is not available on a store field: db.Post["p1"].Comments is consumed with db.Post["p1"].Comments.pop(), which removes at most once. Claim, ack, release, extend and the dead verbs work on a fifo, lifo or heap bucket
+> db.Nope.claim()
+Error: claim failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

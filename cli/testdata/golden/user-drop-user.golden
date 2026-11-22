@@ -1,0 +1,4 @@
+> drop user bob
+user "bob" dropped
+> drop user bob
+Error: dropping user "bob": server error (1): drop user "bob": user not found; run 'user list' to see the users

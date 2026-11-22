@@ -1,0 +1,50 @@
+> dump --out <OUT-DIR>/d1 app
+dumping app/Emails...
+  app/Emails: 1 documents, 43 bytes, sha256:<DIGEST>
+dumping app/Events...
+  app/Events: 1 documents, 34 bytes, sha256:<DIGEST>
+dumping app/Files...
+  app/Files: 1 documents, 199 bytes, sha256:<DIGEST>
+dumping app/Jobs...
+  app/Jobs: 1 documents, 64 bytes, sha256:<DIGEST>
+dumping app/Post...
+  app/Post: 1 documents, 35 bytes, sha256:<DIGEST>
+dumping app/Tasks...
+  app/Tasks: 1 documents, 141 bytes, sha256:<DIGEST>
+dumping app/Users...
+  app/Users: 2 documents, 50 bytes, sha256:<DIGEST>
+warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+dump: 1 database(s), 7 bucket(s), 8 document(s), 566 byte(s)
+  warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+This is the file of the dump statement. 'hoarddb restore' reads only files from 'hoarddb dump'; they are different formats.
+> dump --out <OUT-DIR>/d1 nope
+Error: resolving dump scope: listing buckets in "nope": server error (1): database "nope" not found on this node. Run 'show databases' to list what exists, or 'create database nope' to create it
+> dump --out <OUT-DIR>/d2 app Users
+dumping app/Users...
+  app/Users: 2 documents, 50 bytes, sha256:<DIGEST>
+dump: 1 database(s), 1 bucket(s), 2 document(s), 50 byte(s)
+This is the file of the dump statement. 'hoarddb restore' reads only files from 'hoarddb dump'; they are different formats.
+> dump --out <OUT-DIR>/d3 app Nope
+dump: 0 database(s), 0 bucket(s), 0 document(s), 0 byte(s) (incomplete: 1 bucket(s) failed)
+  FAILED app/Nope: dump start: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it
+This is the file of the dump statement. 'hoarddb restore' reads only files from 'hoarddb dump'; they are different formats.
+Error: dump finished with 1 failed bucket(s); see the failures above (exit code 2 outside the REPL)
+> dump app --out <OUT-DIR>/d4
+dumping app/Emails...
+  app/Emails: 1 documents, 43 bytes, sha256:<DIGEST>
+dumping app/Events...
+  app/Events: 1 documents, 34 bytes, sha256:<DIGEST>
+dumping app/Files...
+  app/Files: 1 documents, 199 bytes, sha256:<DIGEST>
+dumping app/Jobs...
+  app/Jobs: 1 documents, 64 bytes, sha256:<DIGEST>
+dumping app/Post...
+  app/Post: 1 documents, 35 bytes, sha256:<DIGEST>
+dumping app/Tasks...
+  app/Tasks: 1 documents, 141 bytes, sha256:<DIGEST>
+dumping app/Users...
+  app/Users: 2 documents, 50 bytes, sha256:<DIGEST>
+warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+dump: 1 database(s), 7 bucket(s), 8 document(s), 566 byte(s)
+  warning: blob payloads are not captured by any hoardDB dump yet: 1 blob bucket(s) were written to this dump as keys and metadata only — app/Files. A restore recreates those buckets empty, with no keys, no metadata and no payload bytes; the keys and metadata remain in the dump directory's .bson and .metadata.json files. Copy the blob data out of band before relying on this backup.
+This is the file of the dump statement. 'hoarddb restore' reads only files from 'hoarddb dump'; they are different formats.

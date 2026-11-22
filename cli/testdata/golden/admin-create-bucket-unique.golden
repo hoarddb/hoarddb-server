@@ -1,0 +1,20 @@
+> create bucket Emails2 { type: hash, placement: whole, Email string unique }
+OK  created bucket app.Emails2 (type hash, whole)
+Indexes: [Email (unique)]
+> create bucket Both { type: hash, placement: whole, Email string unique, Name string unique }
+OK  created bucket app.Both (type hash, whole)
+Indexes: [Email (unique), Name (unique)]
+> db.Emails.insert({"_id_": "e2", "Email": "a@example.com"})
+Error: insert failed: server error (15): Duplicate value for unique index "Email_1" on bucket "Emails": Email = "a@example.com" is already used by document "e1". Change the value, update that document instead, or delete it first.
+> db.Emails.insert({"_id_": "e3", "Email": "b@example.com"})
+OK  id=e3
+> describe bucket Emails
+BUCKET app.Emails
+---
+Type:               hash
+Entries:            2
+Logical size:       90 B (before compression and compaction)
+Encrypted:          no (this node's store)
+Replication factor: 1 (inherited)
+Placement:          whole
+Indexes:            Email_1 (unique)

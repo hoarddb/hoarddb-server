@@ -1,0 +1,17 @@
+> db.Post["p1"].Tags.put("t2", {"n": 2})
+OK
+> db.Post["p1"].Tags.get("t2")
+{"_id_": "<ID>", "n": 2}
+> db.Post["p1"].Tags.get("zz")
+NOT FOUND
+> db.Post["p1"].Tags.len()
+2
+> db.Post["p1"].Tags.list()
+t1  {"_id_": "<ID>", "n": 1}
+t2  {"_id_": "<ID>", "n": 2}
+> db.Post["p1"].Tags.delete("t2")
+OK
+> db.Post["p1"].Tags.delete("t2")
+NOT FOUND  t2
+> db.Post["p1"].Tags.len()
+1

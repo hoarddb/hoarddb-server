@@ -1,0 +1,11 @@
+> create user bob roles [reader@app]
+user "bob" created (config version 2)
+> create user bob roles [reader@app]
+Error: creating user "bob": server error (2): create user "bob": user already exists; choose another name, or change the existing account with 'alter user bob ...'
+> user describe bob
+user:  bob
+status: enabled
+roles:  [reader@app]
+epoch:  0
+created: <TIMESTAMP>
+password changed: <TIMESTAMP>

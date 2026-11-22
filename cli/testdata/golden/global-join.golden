@@ -1,0 +1,4 @@
+> join 127.0.0.1:2
+Error: join "127.0.0.1:2": server error (5): replication is not enabled on this node; the node must be a cluster member to add another
+> join
+Error: parse: usage: join <address>  (add a node to the cluster; this starts rebalancing)

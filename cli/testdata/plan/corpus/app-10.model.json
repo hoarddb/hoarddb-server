@@ -1,0 +1,60 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-10",
+ "kinds": [
+  {
+   "name": "topic",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "views",
+     "type": "int",
+     "present_permille": 1000,
+     "role": "counter"
+    }
+   ]
+  },
+  {
+   "name": "user",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "topic",
+   "sort": [
+    "score:desc"
+   ],
+   "sort_from": "fixed"
+  },
+  {
+   "op": "update",
+   "coll": "topic",
+   "inc": [
+    "views"
+   ]
+  },
+  {
+   "op": "search",
+   "coll": "topic"
+  }
+ ]
+}

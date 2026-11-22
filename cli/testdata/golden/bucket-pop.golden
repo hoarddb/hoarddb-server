@@ -1,0 +1,16 @@
+> db.Jobs.pop()
+{"_id_": "<ID>", "task": "x"}
+> db.Jobs.pop()
+EMPTY  queue is empty
+> db.Tasks.pop()
+{"_id_": "<ID>", "task": "t"}
+> db.Tasks.pop()
+EMPTY  heap is empty
+> db.Events.pop()
+Error: pop failed: server error (4): pop is not defined for btree buckets: a btree has no order to take from, so there is no "next" to remove. Remove one with delete("<key>"), or read them with get("<key>") or find(). A btree bucket takes: put, insert, insert many, get, exists, delete, update, push, range, first, last, find, distinct, count, search, stats, consistent get.
+> db.Users.pop()
+Error: pop failed: server error (4): pop is not defined for hash buckets: a hash has no order to take from, so there is no "next" to remove. Remove one with delete("<key>"), or read them with get("<key>") or find(). A hash bucket takes: put, insert, insert many, get, exists, delete, update, push, find, distinct, count, search, stats, consistent get.
+> db.Files.pop()
+Error: pop failed: server error (4): pop is not defined for blob buckets: a blob has no order to take from, so there is no "next" to remove. Remove one with delete("<key>"), or read its metadata with info("<key>"). A blob bucket takes: get, exists, delete, put blob, get blob, count, stats.
+> db.Nope.pop()
+Error: pop failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

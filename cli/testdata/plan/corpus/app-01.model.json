@@ -1,0 +1,86 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-01",
+ "kinds": [
+  {
+   "name": "event",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "count",
+     "type": "int",
+     "present_permille": 1000,
+     "role": "counter"
+    },
+    {
+     "name": "day",
+     "type": "int",
+     "present_permille": 1000,
+     "role": "period"
+    }
+   ]
+  },
+  {
+   "name": "app",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "session",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ],
+   "expire_whole": true
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "event",
+   "by": [
+    "app_id"
+   ],
+   "sort_from": "client",
+   "substring": true
+  },
+  {
+   "op": "update",
+   "coll": "event",
+   "inc": [
+    "count"
+   ]
+  },
+  {
+   "op": "join",
+   "coll": "event",
+   "join": {
+    "to": "app",
+    "on": "view",
+    "kind": "aggregate"
+   }
+  }
+ ]
+}

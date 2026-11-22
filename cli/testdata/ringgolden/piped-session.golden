@@ -1,0 +1,19 @@
+--- stdout ---
+WARNING: TLS certificate verification is disabled (--insecure); the connection to <ADDR> cannot be trusted and may be intercepted. Use this only against a local development server.
+Authenticated as root
+Connected to <ADDR>
+hoardDB CLI devel
+Type 'help' for help, 'exit' to quit.
+
+OK  created database app (replication factor 1, this node's default)
+Next: use app
+Then: create bucket <name> { Name string, Purchases fifoStore }   (declare every field)
+Switched to database 'app'
+OK  created bucket app.User (1 fields)
+Fields: Name string
+BUCKETS in app
+---
+NAME  ID                STATE
+User  <BUCKET-ID.....>  active
+--- stderr ---
+CLI error: NOT_FOUND: document "x" is not in app.User. Run 'db.User.list({limit: 10})' to see what exists, or 'db.User.insert({_id_: "x", <field>: <value>})' to create it

@@ -1,0 +1,229 @@
+level 1
+command_version 1
+snapshot_version 1
+kind 0x01
+kind 0x02
+kind 0x03
+kind 0x04
+kind 0x05
+kind 0x06
+kind 0x07
+kind 0x0b
+kind 0x0c
+kind 0x0d
+kind 0x0e
+kind 0x0f
+kind 0x10
+kind 0x11
+kind 0x12
+kind 0x13
+kind 0x14
+kind 0x15
+kind 0x16
+kind 0x01 field cluster_id binary
+kind 0x01 field cluster_version 32-bit integer
+kind 0x01 field self embedded document
+kind 0x01 field self.client_addr string
+kind 0x01 field self.data_addr string
+kind 0x01 field self.id string
+kind 0x01 field self.incarnation 64-bit integer
+kind 0x02 field clear_bits boolean
+kind 0x02 field expect_state string
+kind 0x02 field id string
+kind 0x02 field incarnation 64-bit integer
+kind 0x02 field state string
+kind 0x03 field client_addr string
+kind 0x03 field data_addr string
+kind 0x03 field id string
+kind 0x03 field incarnation 64-bit integer
+kind 0x03 field max_level 32-bit integer
+kind 0x03 field min_level 32-bit integer
+kind 0x03 field placing_set binary
+kind 0x03 field witness boolean
+kind 0x04 field id string
+kind 0x05 field id 64-bit integer
+kind 0x05 field name string
+kind 0x05 field rf 32-bit integer
+kind 0x05 field schema_version 64-bit integer
+kind 0x05 field storage string
+kind 0x06 field id 64-bit integer
+kind 0x06 field rf 32-bit integer
+kind 0x07 field id 64-bit integer
+kind 0x07 field schema_version 64-bit integer
+kind 0x0b field expect_value boolean
+kind 0x0b field key string
+kind 0x0b field value 32-bit integer
+kind 0x0b field value 64-bit integer
+kind 0x0b field value boolean
+kind 0x0c field bits binary
+kind 0x0c field db_id 64-bit integer
+kind 0x0c field node string
+kind 0x0d field bits binary
+kind 0x0d field db_id 64-bit integer
+kind 0x0d field node string
+kind 0x0e field bucket_id 64-bit integer
+kind 0x0e field db_id 64-bit integer
+kind 0x0e field drop boolean
+kind 0x0e field epoch 64-bit integer
+kind 0x0e field from 64-bit integer
+kind 0x0e field retired binary
+kind 0x0e field to 64-bit integer
+kind 0x0f field id string
+kind 0x0f field voting boolean
+kind 0x10 field from 32-bit integer
+kind 0x10 field members array
+kind 0x10 field members[].id string
+kind 0x10 field members[].incarnation 64-bit integer
+kind 0x10 field to 32-bit integer
+kind 0x11 field created_ms 64-bit integer
+kind 0x11 field credential embedded document
+kind 0x11 field credential.algo string
+kind 0x11 field credential.hash binary
+kind 0x11 field credential.iterations 64-bit integer
+kind 0x11 field credential.memory 64-bit integer
+kind 0x11 field credential.parallelism 32-bit integer
+kind 0x11 field credential.pepper_kid string
+kind 0x11 field credential.salt binary
+kind 0x11 field name string
+kind 0x11 field request binary
+kind 0x12 field by string
+kind 0x12 field by_seq 64-bit integer
+kind 0x12 field created_ms 64-bit integer
+kind 0x12 field credential embedded document
+kind 0x12 field credential.algo string
+kind 0x12 field credential.hash binary
+kind 0x12 field credential.iterations 64-bit integer
+kind 0x12 field credential.memory 64-bit integer
+kind 0x12 field credential.parallelism 32-bit integer
+kind 0x12 field credential.pepper_kid string
+kind 0x12 field credential.salt binary
+kind 0x12 field enabled boolean
+kind 0x12 field expect_drop_seq 64-bit integer
+kind 0x12 field name string
+kind 0x12 field request binary
+kind 0x12 field roles array
+kind 0x12 field roles[].db string
+kind 0x12 field roles[].role string
+kind 0x13 field by string
+kind 0x13 field by_seq 64-bit integer
+kind 0x13 field credential embedded document
+kind 0x13 field credential.algo string
+kind 0x13 field credential.hash binary
+kind 0x13 field credential.iterations 64-bit integer
+kind 0x13 field credential.memory 64-bit integer
+kind 0x13 field credential.parallelism 32-bit integer
+kind 0x13 field credential.pepper_kid string
+kind 0x13 field credential.salt binary
+kind 0x13 field enabled boolean
+kind 0x13 field expect_seq 64-bit integer
+kind 0x13 field name string
+kind 0x13 field password_changed_ms 64-bit integer
+kind 0x13 field request binary
+kind 0x13 field roles array
+kind 0x13 field roles[].db string
+kind 0x13 field roles[].role string
+kind 0x14 field by string
+kind 0x14 field by_seq 64-bit integer
+kind 0x14 field expect_seq 64-bit integer
+kind 0x14 field name string
+kind 0x14 field request binary
+kind 0x15 field by string
+kind 0x15 field by_seq 64-bit integer
+kind 0x15 field db string
+kind 0x15 field expect_seq 64-bit integer
+kind 0x15 field name string
+kind 0x15 field request binary
+kind 0x15 field role string
+kind 0x16 field by string
+kind 0x16 field by_seq 64-bit integer
+kind 0x16 field db string
+kind 0x16 field expect_seq 64-bit integer
+kind 0x16 field name string
+kind 0x16 field request binary
+kind 0x16 field role string
+domain storage word "disk" -> 0
+domain storage word "memory" -> 1
+domain storage: Use storage: disk or storage: memory
+domain member state byte 1 -> joining
+domain member state byte 2 -> active
+domain member state byte 3 -> down
+domain member state byte 4 -> leaving
+domain member state byte 5 -> dead
+domain member state byte: use 1 joining, 2 active, 3 down, 4 leaving or 5 dead
+domain member state word: member state "\x00probe" is not a state: use joining, active, down, leaving or dead
+domain setting keys: stale_reads, heartbeat_ms, step_down_ms, failover_ms, dead_ms, probe_interval_ms, probe_timeout_ms or probe_failures
+domain role names: root reader writer db-manager user-manager cluster-manager backup-operator restore-operator
+domain role root includes: root reader writer db-manager user-manager cluster-manager backup-operator restore-operator
+domain role reader includes: reader
+domain role writer includes: reader writer
+domain role db-manager includes: reader writer db-manager
+domain role user-manager includes: user-manager
+domain role cluster-manager includes: cluster-manager
+domain role backup-operator includes: reader backup-operator
+domain role restore-operator includes: restore-operator
+domain user administrators: root@* user-manager@*
+domain credential window: memory_kib 65536..131072 iterations 3..6 parallelism 1..16 salt 16..64 hash 32
+domain user request list: 256
+domain user ceiling: 10000
+domain reserved user name: __node__
+domain credential algorithm: argon2id
+snapshot.v 32-bit integer
+snapshot.cluster_version 32-bit integer
+snapshot.cluster_id binary
+snapshot.epoch 64-bit integer
+snapshot.state_seq 64-bit integer
+snapshot.next_database_id 64-bit integer
+snapshot.voters array
+snapshot.members array
+snapshot.members[].id string
+snapshot.members[].incarnation 64-bit integer
+snapshot.members[].data_addr string
+snapshot.members[].client_addr string
+snapshot.members[].state string
+snapshot.members[].suffrage string
+snapshot.members[].witness boolean
+snapshot.members[].joined_epoch 64-bit integer
+snapshot.members[].joined_state_seq 64-bit integer
+snapshot.databases array
+snapshot.databases[].name string
+snapshot.databases[].id 64-bit integer
+snapshot.databases[].rf 32-bit integer
+snapshot.databases[].schema_version 64-bit integer
+snapshot.databases[].storage string
+snapshot.seed_bitmaps array
+snapshot.seed_bitmaps[].node string
+snapshot.seed_bitmaps[].db_id 64-bit integer
+snapshot.seed_bitmaps[].bits binary
+snapshot.settings embedded document
+snapshot.settings.stale_reads boolean
+snapshot.settings.heartbeat_ms 64-bit integer
+snapshot.settings.step_down_ms 64-bit integer
+snapshot.settings.failover_ms 64-bit integer
+snapshot.settings.dead_ms 64-bit integer
+snapshot.settings.probe_interval_ms 64-bit integer
+snapshot.settings.probe_timeout_ms 64-bit integer
+snapshot.settings.probe_failures 32-bit integer
+snapshot.users array
+snapshot.users[].name string
+snapshot.users[].roles array
+snapshot.users[].roles[].role string
+snapshot.users[].roles[].db string
+snapshot.users[].algo string
+snapshot.users[].salt binary
+snapshot.users[].hash binary
+snapshot.users[].pepper_kid string
+snapshot.users[].memory 64-bit integer
+snapshot.users[].iterations 64-bit integer
+snapshot.users[].parallelism 32-bit integer
+snapshot.users[].enabled boolean
+snapshot.users[].epoch 64-bit integer
+snapshot.users[].login_generation 64-bit integer
+snapshot.users[].created_ms 64-bit integer
+snapshot.users[].password_changed_ms 64-bit integer
+snapshot.users[].created_seq 64-bit integer
+snapshot.users[].changed_seq 64-bit integer
+snapshot.pepper_kid string
+snapshot.user_drop_seq 64-bit integer
+snapshot.user_requests array
+snapshot.user_requests[].request binary
+snapshot.user_requests[].state_seq 64-bit integer

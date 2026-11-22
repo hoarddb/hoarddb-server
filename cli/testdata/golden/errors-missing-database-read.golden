@@ -1,0 +1,12 @@
+> db.Users.count()
+Error: count failed: server error (1): database "app" not found on this node. Run 'show databases' to list what exists, or 'create database app' to create it
+> db.Users.find("u1")
+Error: find failed: server error (1): database "app" not found on this node. Run 'show databases' to list what exists, or 'create database app' to create it
+> db.Users.find()
+Error: database "app" not found on this node. Run 'show databases' to list what exists, or 'create database app' to create it
+> db.Users.insert({"n": 1})
+Error: insert failed: server error (1): database "app" not found on this node. Run 'show databases' to list what exists, or 'create database app' to create it
+> show buckets
+Error: listing buckets in "app": server error (1): database "app" not found on this node. Run 'show databases' to list what exists, or 'create database app' to create it
+> describe bucket Users
+Error: describing bucket "Users": server error (1): database "app" not found on this node. Run 'show databases' to list what exists, or 'create database app' to create it

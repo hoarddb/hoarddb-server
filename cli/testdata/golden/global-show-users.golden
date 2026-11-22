@@ -1,0 +1,4 @@
+> show users
+USERS (master:  at <ADDR>, config version 1)
+---
+admin: enabled, roles [root@*], epoch 0

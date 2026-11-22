@@ -1,0 +1,14 @@
+> db.Users.search({"n": 1})
+Found 1 results (full scan):
+{"_id_": "u1", "n": 1}
+> db.Users.search({"n": {"$gt": 0}})
+Found 2 results (full scan):
+{"_id_": "u1", "n": 1}
+{"_id_": "u2", "n": 9}
+> db.Users.search({"zzz": 1})
+NO RESULTS (full scan)
+> db.Emails.search({"Email": "a@example.com"})
+Found 1 results (via Email_1):
+{"Email": "a@example.com", "_id_": "e1"}
+> db.Nope.search({"n": 1})
+Error: search failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it

@@ -1,0 +1,30 @@
+/*
+ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Modified by the hoardDB project, 2026-11-15: TableIndex gains
+ * bloom_prefix_rules, the prefix rules a table's bloom filter was built under.
+ * An on-disk format change. See hoardDB/third_party/README.md.
+ */
+
+namespace fb;
+
+table TableIndex {
+  offsets:[BlockOffset];
+  bloom_filter:[ubyte];
+  max_version:uint64;
+  key_count:uint32;
+  uncompressed_size:uint32;
+  on_disk_size:uint32;
+  stale_data_size:uint32;
+  bloom_prefix_rules:uint32;
+}
+
+table BlockOffset {
+  key:[ubyte];
+  offset:uint;
+  len:uint;
+}
+
+root_type TableIndex;
+root_type BlockOffset;

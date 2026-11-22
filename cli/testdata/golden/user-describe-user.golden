@@ -1,0 +1,9 @@
+> user describe bob
+user:  bob
+status: enabled
+roles:  [reader@app]
+epoch:  0
+created: <TIMESTAMP>
+password changed: <TIMESTAMP>
+> user describe nobody
+Error: user "nobody" not found; run 'user list' to see the users

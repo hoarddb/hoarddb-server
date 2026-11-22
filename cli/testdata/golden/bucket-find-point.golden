@@ -1,0 +1,12 @@
+> db.Users.find("u1")
+{"_id_": "u1", "n": 1}
+> db.Users.find("zz")
+NOT FOUND
+> db.Users.find({_id_: "u2"})
+{"_id_": "u2", "n": 9}
+> db.Jobs.find("k")
+Error: find failed: server error (4): get is not supported for bucket type fifo. A fifo bucket takes: put, insert, insert many, push, pop, peek, claim, ack, release, extend, dead, requeue, discard, find, distinct, count, search, stats.
+> db.Nope.find("k")
+Error: find failed: server error (1): bucket not found: bucket "Nope" not found in database "app". Run 'show buckets in app' to list what exists, or 'create bucket Nope in app { type: hash }' to create it
+> db.Files.find("f1")
+{"_id_": "f1", "blob_id": "<ID>", "size": 2}

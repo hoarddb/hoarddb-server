@@ -1,0 +1,110 @@
+> help fifo
+
+FIFO Store Operations (First In, First Out):
+  db.<bucket>.push({field: value})    Append to tail
+  db.<bucket>.pop()                    Remove from head (oldest first)
+  db.<bucket>.pop({limit: N})          Remove the next N from head (oldest first)
+  db.<bucket>.peek()                   Look at head without removing
+  db.<bucket>.length()                 Number of items
+  pop() and pop({limit: N}) remove what they return; peek() and peek({limit: N}) look without removing.
+  peek() returns the one entry pop() would take next.
+  peek({limit: N}) returns the next N, in pop order, and removes none of them.
+  pop removes at most once; to process without losing work, use claim and ack (help claim).
+
+Example:
+  db.Comments.push({Author: "Bob", Text: "Hi"})
+  db.Comments.pop()    → {Author: "Bob", Text: "Hi"}
+> help lifo
+
+LIFO Store Operations (Last In, First Out):
+  db.<bucket>.push({field: value})    Push to top
+  db.<bucket>.pop()                    Remove from top (newest first)
+  db.<bucket>.pop({limit: N})          Remove the next N from top (newest first)
+  db.<bucket>.peek()                   Look at top without removing
+  db.<bucket>.length()                 Number of items
+  pop() and pop({limit: N}) remove what they return; peek() and peek({limit: N}) look without removing.
+  peek() returns the one entry pop() would take next.
+  peek({limit: N}) returns the next N, in pop order, and removes none of them.
+  pop removes at most once; to process without losing work, use claim and ack (help claim).
+
+Example:
+  db.Sessions.push({IP: "192.0.2.1"})
+  db.Sessions.pop()   → {IP: "192.0.2.1"}
+> help heap
+
+Heap Store Operations (Priority Queue):
+  db.<bucket>.push({priority: N, field: value})  Push with priority
+  db.<bucket>.pop()                               Highest priority first
+  db.<bucket>.pop({limit: N})                     The next N, highest priority first, removed
+  db.<bucket>.peek()                              See highest without removing
+  db.<bucket>.length()                            Count
+  pop() and pop({limit: N}) remove what they return; peek() and peek({limit: N}) look without removing.
+  peek() returns the one entry pop() would take next.
+  peek({limit: N}) returns the next N, highest priority first, and removes none of them.
+  pop removes at most once; to process without losing work, use claim and ack (help claim).
+
+Example:
+  db.Alerts.push({priority: 10, Msg: "Critical"})
+  db.Alerts.pop()    → {Msg: "Critical"}   (the priority orders the element; it is not stored)
+> help fields
+
+Field Stores (a store on each document):
+  create bucket Post { Comments fifoStore, Photos blobStore }   Declare store fields
+  alter bucket Post { Tags hashStore }                          Add one (never remove)
+  Each document of Post has its own Comments, Photos and Tags.
+
+  db.Post["<key>"].Comments.push({field: value})   fifo/lifo/heap: push, pop, peek
+  db.Post["<key>"].Comments.pop()                  The oldest comment of that post
+  db.Post["<key>"].Comments.pop({limit: 3})        The oldest 3, removed, in pop order
+  db.Post["<key>"].Comments.peek()                 The one pop() would take next
+  db.Post["<key>"].Comments.peek({limit: 3})       The next 3, in pop order, none removed
+  list({limit: N}) reads in storage order instead: pop order on a fifo, the
+  reverse of it on a lifo.
+  db.Post["<key>"].Tags.put("go", {w: 1})           hash/btree/blob: put, get, delete
+  db.Post["<key>"].Tags.get("go")
+  db.Post["<key>"].Comments.len()                   Element count of that post
+  len(), length() and count() all answer this
+  db.Post["<key>"].Comments.list({limit: 10})       Elements in order
+
+  A store on a store's elements (L3), addressed through the element:
+  create bucket Post { Comments fifoStore { Flags fifoStore } }
+  db.Post["<key>"].Comments[0].Flags.push({reason: "spam"})
+
+  Deleting a document deletes its stores. describe bucket Post lists them.
+> help claim
+
+Claim and Acknowledge (work a worker must not lose):
+  pop() removes an entry at most once: a worker that dies after it has lost the work.
+  claim takes entries under a lease instead. An entry nobody acknowledges before the
+  lease ends goes back to the queue and is delivered again, up to 5 times.
+  Works on fifo, lifo and heap buckets (not on store fields: use pop there).
+
+  db.Jobs.claim({limit: 10, lease: "30s"})      Take up to 10; they come back if not acknowledged in 30s
+  db.Jobs.ack({lease_id: "<lease_id>", item_ids: ["<item_id>"]})   Acknowledge the ones you finished
+  db.Jobs.ack({lease_id: "<lease_id>"})          Acknowledge every entry the lease still holds
+  db.Jobs.extend({lease_id: "<lease_id>", lease: "60s"})   Keep working past the lease
+  db.Jobs.release({lease_id: "<lease_id>"})      Give them back now
+  db.Jobs.dead()                                 Entries claimed 5 times without an acknowledgement
+  db.Jobs.dead({limit: 50, after: "<dead_id>"})  The next page of them
+  db.Jobs.requeue({dead_id: "<dead_id>"})        Put one back in the queue, its count reset
+  db.Jobs.requeue({all: true})                   Put every dead entry back
+  db.Jobs.discard({dead_id: "<dead_id>"})        Drop one for good
+  db.Jobs.discard({all: true})                   Drop every dead entry
+
+  lease takes a unit: "1500ms", "30s", "5m" or "1h", from 1s to 1h. A bare 30 is refused.
+  Without a lease the default is 30s; without a limit, claim takes one entry.
+
+  A whole loop, with the ids claim prints on its last line:
+
+  [h]oardDB [app]> db.Jobs.push({task: "resize"})
+  OK  id=<ID>
+  [h]oardDB [app]> db.Jobs.claim({lease: "30s"})
+  {"_id_": "<ID>", "task": "resize"}
+  lease_id <LEASE-ID> for 30s; item_ids ["<HANDLE>"]
+  [h]oardDB [app]> db.Jobs.ack({lease_id: "<LEASE-ID>", item_ids: ["<HANDLE>"]})
+  acked 1
+
+  The item_ids are the handles claim printed, not the documents' _id_ values.
+  len() does not count claimed entries; it prints them beside the number.
+  An entry claimed 5 times without an ack is dead, not delivered again: describe bucket
+  and show buckets say which buckets hold some, and dead() lists them.

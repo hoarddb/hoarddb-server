@@ -1,0 +1,169 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-09",
+ "kinds": [
+  {
+   "name": "entry",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "feed_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "feed",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "feed",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "tombstone",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "entry",
+   "by": [
+    "user_id"
+   ],
+   "filters": [
+    {
+     "field": "f0",
+     "optional": true
+    },
+    {
+     "field": "f1",
+     "optional": true
+    },
+    {
+     "field": "f2",
+     "optional": true
+    },
+    {
+     "field": "f3",
+     "optional": true
+    },
+    {
+     "field": "f4",
+     "optional": true
+    },
+    {
+     "field": "f5",
+     "optional": true
+    },
+    {
+     "field": "f6",
+     "optional": true
+    },
+    {
+     "field": "f7",
+     "optional": true
+    },
+    {
+     "field": "f8",
+     "optional": true
+    },
+    {
+     "field": "f9",
+     "optional": true
+    },
+    {
+     "field": "f10",
+     "optional": true
+    },
+    {
+     "field": "f11",
+     "optional": true
+    },
+    {
+     "field": "f12",
+     "optional": true
+    },
+    {
+     "field": "f13",
+     "optional": true
+    },
+    {
+     "field": "f14",
+     "optional": true
+    },
+    {
+     "field": "f15",
+     "optional": true
+    },
+    {
+     "field": "f16",
+     "optional": true
+    },
+    {
+     "field": "f17",
+     "optional": true
+    },
+    {
+     "field": "f18",
+     "optional": true
+    },
+    {
+     "field": "f19",
+     "optional": true
+    }
+   ],
+   "sort": [
+    "published:desc"
+   ],
+   "sort_from": "setting"
+  },
+  {
+   "op": "join",
+   "coll": "entry",
+   "join": {
+    "to": "feed",
+    "on": "unread",
+    "kind": "aggregate"
+   }
+  },
+  {
+   "op": "delete",
+   "coll": "entry",
+   "atomic_with": "retire"
+  },
+  {
+   "op": "insert",
+   "coll": "tombstone",
+   "atomic_with": "retire"
+  }
+ ]
+}

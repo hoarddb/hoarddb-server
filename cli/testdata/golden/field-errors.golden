@@ -1,0 +1,23 @@
+> db.Post["nope"].Comments.get("c1")
+Error: db.Post["nope"].Comments.get(): server error (4): operation not supported by the field's engine: "get" is not an operation on "Comments", which is declared fifoStore. Fifo fields take push, pop and peek; get is one of put, get and delete, which are for hashStore, btreeStore and blobStore.
+Declared engines on "Post": Comments (fifo), Tags (hash)
+> db.Post["nope"].Comments.peek()
+Error: db.Post["nope"].Comments.peek(): server error (1): parent document not found: No document with key "nope" in bucket "Post", so there is no "Comments" store to read. A store field exists for each document, so the document has to exist first.
+Run 'db.Post.find({_id_: "nope"})' to check the key
+> db.Post["nope"].Tags.get("t1")
+Error: db.Post["nope"].Tags.get(): server error (1): parent document not found: No document with key "nope" in bucket "Post", so there is no "Tags" store to read. A store field exists for each document, so the document has to exist first.
+Run 'db.Post.find({_id_: "nope"})' to check the key
+> db.Post["p1"].Comments.put("k", {})
+Error: db.Post["p1"].Comments.put(): server error (4): operation not supported by the field's engine: "put" is not an operation on "Comments", which is declared fifoStore. Fifo fields take push, pop and peek; put is one of put, get and delete, which are for hashStore, btreeStore and blobStore.
+Declared engines on "Post": Comments (fifo), Tags (hash)
+> db.Post["p1"].Tags.push({"a": 1})
+Error: db.Post["p1"].Tags.push(): server error (4): operation not supported by the field's engine: "push" is not an operation on "Tags", which is declared hashStore. Hash fields take put/get/delete by element key; push is one of push, pop and peek, which are for fifoStore, lifoStore and heapStore.
+Declared engines on "Post": Comments (fifo), Tags (hash)
+> db.Post["p1"].Nothing.len()
+Error: db.Post["p1"].Nothing.len(): server error (1): store field not declared: Bucket "Post" in database "app" declares no store field named "Nothing".
+It declares: Comments (fifo), Tags (hash).
+Run 'describe bucket Post in app' to see the declaration
+> db.Users["u1"].Comments.len()
+Error: db.Users["u1"].Comments.len(): server error (1): store field not declared: Bucket "Users" in database "app" declares no store field named "Comments".
+It declares: no store fields.
+Run 'describe bucket Users in app' to see the declaration

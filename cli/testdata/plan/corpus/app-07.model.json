@@ -1,0 +1,81 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-07",
+ "kinds": [
+  {
+   "name": "archive",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "visit",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  },
+  {
+   "name": "site",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "archive",
+   "by": [
+    "idsite"
+   ],
+   "sort_from": "fixed",
+   "visibility": "container"
+  },
+  {
+   "op": "list",
+   "coll": "visit",
+   "dynamic": true,
+   "surface": "admin"
+  },
+  {
+   "op": "join",
+   "coll": "visit",
+   "join": {
+    "to": "site",
+    "on": "dimension",
+    "kind": "aggregate"
+   },
+   "dynamic": true,
+   "surface": "admin"
+  },
+  {
+   "op": "update",
+   "coll": "archive",
+   "inc": [
+    "count"
+   ]
+  }
+ ]
+}

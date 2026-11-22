@@ -1,0 +1,28 @@
+> show buckets in app
+BUCKETS in app
+---
+Encrypted: no (this node's store; the same for every bucket)
+NAME    TYPE   ENTRIES  REPLICATION
+Emails  hash   1        rf 1 (inherited)
+Events  btree  1        rf 1 (inherited)
+Files   blob   1        rf 1 (inherited)
+Jobs    fifo   1        rf 1 (inherited)
+Post    hash   1        rf 1 (inherited)
+Tasks   heap   1        rf 1 (inherited)
+Users   hash   2        rf 1 (inherited)
+> show buckets
+BUCKETS in app
+---
+Encrypted: no (this node's store; the same for every bucket)
+NAME    TYPE   ENTRIES  REPLICATION
+Emails  hash   1        rf 1 (inherited)
+Events  btree  1        rf 1 (inherited)
+Files   blob   1        rf 1 (inherited)
+Jobs    fifo   1        rf 1 (inherited)
+Post    hash   1        rf 1 (inherited)
+Tasks   heap   1        rf 1 (inherited)
+Users   hash   2        rf 1 (inherited)
+> show buckets in nope
+Error: listing buckets in "nope": server error (1): database "nope" not found on this node. Run 'show databases' to list what exists, or 'create database nope' to create it
+> show
+Error: parse: usage: show databases|buckets|users [in <database>]

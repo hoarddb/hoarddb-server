@@ -1,0 +1,21 @@
+> db.Files.get("f1")
+Key:    f1
+Blob:   <ID>
+Size:   2 B
+Data:
+hi
+> db.Files.get("nope")
+NOT FOUND
+> db.Files.info("f1")
+Key:      f1
+Blob:     <ID>
+Size:     2 B
+Metadata: (none)
+> db.Files.info("nope")
+NOT FOUND
+> db.Files.stream()
+Error: streaming is not available yet
+       the transport defines OpStreamOpen but the server does not implement
+       chunked reads. Read the whole blob instead:
+         db.Files.get({_id_: "key"})              print it
+         db.Files.get({_id_: "key", out: "f.bin"}) write it to a file

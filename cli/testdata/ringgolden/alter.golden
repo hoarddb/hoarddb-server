@@ -1,0 +1,46 @@
+[h]oardDB [app]> alter bucket User { add Email string, drop Age }
+OK  altered bucket app.User (3 fields)
+Added: Email string
+Dropped: Age (its values are deleted in the background)
+[h]oardDB [app]> describe bucket User
+BUCKET app.User
+---
+Id:                  <BUCKET-ID.....>
+State:               active
+Declaration version: 2
+Fields:              (in declaration order)
+  Name         string
+  Purchases    fifoStore
+  Email        string
+[h]oardDB [app]> alter bucket User { add Email string }
+OK  bucket app.User already has these fields (3 fields), so nothing changed
+[h]oardDB [app]> alter bucket User { add Orders fifoStore }
+OK  altered bucket app.User (4 fields)
+Added: Orders fifoStore
+[h]oardDB [app]> alter bucket User { drop Email, add Email string }
+Error: INVALID_ARGUMENT: alter bucket User in app names field "Email" twice, and one alter changes a field once (a type never changes: dropping a field and adding it again would lose its values). Name each field once, in an add or in a drop
+[h]oardDB [app]> alter bucket User { add Name int }
+Error: INVALID_ARGUMENT: field "Name" in app.User is declared string and this statement declares it int; a declared type never changes, because stored values were written as string. Add a new field and copy the values: 'alter bucket User in app { add <NewField> <type> }', update into <NewField>, then 'alter bucket User in app { drop Name }'
+[h]oardDB [app]> alter bucket User { drop Nmae }
+Error: INVALID_ARGUMENT: field "Nmae" is not declared in app.User, so there is nothing to drop (declared: Name string, Purchases fifoStore, Email string, Orders fifoStore). Nothing was changed. Run 'describe bucket User in app' to see the fields; if an earlier drop of Nmae finished, it is already gone
+[h]oardDB [app]> alter bucket Nope { add A string }
+Error: NOT_FOUND: bucket "Nope" not found in database "app": the declaration fetch returned no document under that name in app._buckets. Run 'show buckets in app' to list what exists, or 'create bucket Nope { <Field> string }' to create it
+[h]oardDB [app]> alter bucket User { drop Age }
+Error: INVALID_ARGUMENT: field "Age" is not declared in app.User, so there is nothing to drop (declared: Name string, Purchases fifoStore, Email string, Orders fifoStore). Nothing was changed. Run 'describe bucket User in app' to see the fields; if an earlier drop of Age finished, it is already gone
+[h]oardDB [app]> alter bucket User { add Age int }
+OK  altered bucket app.User (5 fields)
+Added: Age int
+[h]oardDB [app]> describe bucket User
+BUCKET app.User
+---
+Id:                  <BUCKET-ID.....>
+State:               active
+Declaration version: 4
+Fields:              (in declaration order)
+  Name         string
+  Purchases    fifoStore
+  Email        string
+  Orders       fifoStore
+  Age          int
+[h]oardDB [app]> alter bucket User { }
+Error: PARSE_ERROR: cannot read the statement at character 21: found "}", expected "add", "drop" or "set". The form is 'alter bucket <name> [in <db>] { add <Field> <type>, … }'. For example 'alter bucket User { add Email string, drop Age }'. Run 'help alter' for every form

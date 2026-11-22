@@ -1,0 +1,13 @@
+┌─ hoardDB ────────────────────────────────────────────────────────────────┐
+│ node        node-a (active)               version 1.1.0-dev              │
+│ address     192.0.2.10:7533               uptime 76h12m5s                │
+│ cluster     4 members, 3 voters           leader node-b                  │
+│ epoch       4                             RF default 2                   │
+│ process mem 1.2 GiB of 15.6 GiB (7.7%)                                   │
+│ cpus        4                             load 1.02 0.98 0.91            │
+│ server ram  6.1 GiB of 15.6 GiB                                          │
+│ session     admin @ app                   2026-10-31 16:38:25            │
+└──────────────────────────────────────────────────────────────────────────┘
+Databases: app. Pick one with: use app
+Type 'help' to get started, 'exit' to quit.
+

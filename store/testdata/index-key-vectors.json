@@ -1,0 +1,165 @@
+{
+  "comment": "Frozen key-encoding vectors (index-parity-spec \u00a73.4, \u00a73.4.1; shared-storage-spec \u00a73.8). Computed once, independently of store/indexkey.go, and never regenerated: a change to any row is a data-format change. value is decimal for integers, Python repr for floats, milliseconds for datetime and time, hex for string, binary and objectid (its twelve raw bytes; no escaping, since the payload is fixed width).",
+  "vectors": [
+    {
+      "type": "int",
+      "value": "30",
+      "hex": "30c03e00000000000001800000000000001e"
+    },
+    {
+      "type": "int8",
+      "value": "-7",
+      "hex": "303fe3ffffffffffff017ffffffffffffff9"
+    },
+    {
+      "type": "int16",
+      "value": "300",
+      "hex": "30c072c0000000000001800000000000012c"
+    },
+    {
+      "type": "int32",
+      "value": "30",
+      "hex": "30c03e00000000000001800000000000001e"
+    },
+    {
+      "type": "int64",
+      "value": "-9007199254740993",
+      "hex": "303cbfffffffffffff017fdfffffffffffff"
+    },
+    {
+      "type": "int64",
+      "value": "9223372036854775807",
+      "hex": "30c3e000000000000001ffffffffffffffff"
+    },
+    {
+      "type": "int64",
+      "value": "-9223372036854775808",
+      "hex": "303c1fffffffffffff010000000000000000"
+    },
+    {
+      "type": "uint",
+      "value": "30",
+      "hex": "30c03e00000000000001800000000000001e"
+    },
+    {
+      "type": "uint8",
+      "value": "255",
+      "hex": "30c06fe000000000000180000000000000ff"
+    },
+    {
+      "type": "uint16",
+      "value": "65535",
+      "hex": "30c0efffe00000000001800000000000ffff"
+    },
+    {
+      "type": "uint32",
+      "value": "4294967295",
+      "hex": "30c1efffffffe000000180000000ffffffff"
+    },
+    {
+      "type": "uint64",
+      "value": "18446744073709551615",
+      "hex": "30c3f000000000000002ffffffffffffffff"
+    },
+    {
+      "type": "uint64",
+      "value": "9223372036854775808",
+      "hex": "30c3e0000000000000028000000000000000"
+    },
+    {
+      "type": "float32",
+      "value": "1.5",
+      "hex": "30bff800000000000003bff8000000000000"
+    },
+    {
+      "type": "float64",
+      "value": "-2.5",
+      "hex": "303ffbffffffffffff033ffbffffffffffff"
+    },
+    {
+      "type": "float64",
+      "value": "-0.0",
+      "hex": "308000000000000000018000000000000000"
+    },
+    {
+      "type": "float64",
+      "value": "0.1",
+      "hex": "30bfb999999999999a03bfb999999999999a"
+    },
+    {
+      "type": "float64",
+      "value": "1e+300",
+      "hex": "30fe37e43c8800759c03fe37e43c8800759c"
+    },
+    {
+      "type": "float64",
+      "value": "9.223372036854776e+18",
+      "hex": "30c3e0000000000000028000000000000000"
+    },
+    {
+      "type": "float64",
+      "value": "30.0",
+      "hex": "30c03e00000000000001800000000000001e"
+    },
+    {
+      "type": "datetime",
+      "value": "1700000000000",
+      "hex": "408000018bcfe56800"
+    },
+    {
+      "type": "datetime",
+      "value": "-1",
+      "hex": "407fffffffffffffff"
+    },
+    {
+      "type": "time",
+      "value": "1700000000000",
+      "hex": "408000018bcfe56800"
+    },
+    {
+      "type": "string",
+      "value": "",
+      "hex": "500000"
+    },
+    {
+      "type": "string",
+      "value": "610062",
+      "hex": "506100ff620000"
+    },
+    {
+      "type": "string",
+      "value": "6100ff62",
+      "hex": "506100ffff620000"
+    },
+    {
+      "type": "string",
+      "value": "616263",
+      "hex": "506162630000"
+    },
+    {
+      "type": "binary",
+      "value": "0001ff",
+      "hex": "6000ff01ff0000"
+    },
+    {
+      "type": "bool",
+      "value": "true",
+      "hex": "2001"
+    },
+    {
+      "type": "bool",
+      "value": "false",
+      "hex": "2000"
+    },
+    {
+      "type": "null",
+      "value": "",
+      "hex": "10"
+    },
+    {
+      "type": "objectid",
+      "value": "654a1f0000deadbeef010200",
+      "hex": "70654a1f0000deadbeef010200"
+    }
+  ]
+}

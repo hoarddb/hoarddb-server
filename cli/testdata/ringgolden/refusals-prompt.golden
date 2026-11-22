@@ -1,0 +1,68 @@
+[h]oardDB [app]> promote node-b
+Error: INVALID_ARGUMENT: membership changes are not available on this node yet:
+       set cluster.enabled: true and restart; the join, promote, leave,
+       remove-node and replace-node commands arrive with the cluster membership
+       work
+[h]oardDB [app]> alter database app { replication_factor: 2 }
+Error: alter database is not available yet: the ring wire carries create
+       database, create bucket, the show and describe statements for databases
+       and buckets, the document and store statements, the user and role
+       statements and the seeding statements, and has no request for it.
+       Fix:   Run 'help' to list what runs
+[h]oardDB [app]> use shop
+Error: NOT_FOUND: database "shop" not found.
+       Fix:   Run 'show databases' to list what exists, or 'create database
+              shop' to create it
+[h]oardDB [app]> describe bucket Nope
+Error: NOT_FOUND: bucket "Nope" not found in database "app": the declaration
+       fetch returned no document under that name in app._buckets.
+       Fix:   Run 'show buckets in app' to list what exists, or 'create bucket
+              Nope { <Field> string }' to create it
+[h]oardDB [app]> frobnicate
+Error: PARSE_ERROR: "frobnicate" is not a statement.
+       Fix:   Run 'help' for the first five minutes, or 'help all' for every
+              statement.
+[h]oardDB [app]> creat database app
+Error: PARSE_ERROR: "creat" is not a statement. Did you mean create?
+       For example: create database app
+[h]oardDB [app]> db.User.find()
+Error: PARSE_ERROR: find is not a statement: reading one document has one
+       spelling.
+       Fix:   Run 'db.User["<id>"].get()' to read a document by id, or
+              'db.User.list({limit: 10})' to see what exists (the CLI does not
+              run this; 'help' lists the statements it runs)
+[h]oardDB [app]> create bucket
+Error: PARSE_ERROR: cannot read the statement at character 14: found the end of
+       the statement, expected a name.
+       The form:    create bucket <name> [in <db>] { <Field> <type>, … }
+       For example: create bucket User { Name string, Purchases fifoStore }
+       Every form:  help create
+[h]oardDB [app]> db.User["ada"].get(
+Error: PARSE_ERROR: cannot read the statement at character 20: found the end of
+       the statement, expected ")" or "{".
+       The form:    db.<bucket>["<id>"].get([{…}])
+       For example: db.User["ada"].get()
+       Every form:  help get
+[h]oardDB [app]> show buckets limit
+Error: PARSE_ERROR: cannot read the statement at character 19: found the end of
+       the statement, expected a number.
+       The form:    show buckets [in <db>] [limit <n>] [cursor <hex>]
+       For example: show buckets in app
+       Every form:  help show
+[h]oardDB [app]> db.User["ghost"].get()
+Error: NOT_FOUND: bucket "User" not found in database "app": the declaration
+       fetch returned no document under that name in app._buckets.
+       Fix:   Run 'show buckets in app' to list what exists, or 'create bucket
+              User { <Field> string }' to create it
+[h]oardDB [app]> db.User.insert({_id_: "a"
+Error: PARSE_ERROR: cannot read the statement at character 26: found the end of
+       the statement, expected "," or "}".
+       The form:    db.<bucket>.insert({…})
+       For example: db.User.insert({_id_: "ada", Name: "Ada"})
+       Every form:  help insert
+[h]oardDB [app]> help fifo
+Error: no help for "fifo". Topics: create, alter, drop, show, describe, db, get,
+       list, count, insert, upsert, update, delete, grant, revoke, user, join,
+       promote, replace-node, nodes, status, seeding, use, set, help, push, pop,
+       peek, sum, nearest, take, put, inc, claim, ack, release, extend, types,
+       all. Try 'help types' for the stores.

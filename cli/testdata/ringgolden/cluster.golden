@@ -1,0 +1,15 @@
+[h]oardDB> nodes
+NODE  STATE   ADDRESS                    ROLE
+n1    active  <ADDR> (cluster)  member
+Voters: 1 of 1 members
+epoch 1, state_seq 1
+This node is the only member of its cluster. Add others with 'join <node>@<addr>' (for example 'join node2@node2:4433').
+[h]oardDB> status
+Node:            n1 (active)
+Epoch:           1
+Leader:          n1
+Serving:         ok
+Voters:          1 of 1 members
+State version:   1-1
+Cluster version: 1 (1.1)
+This node is the only member of its cluster. Add others with 'join <node>@<addr>' (for example 'join node2@node2:4433').

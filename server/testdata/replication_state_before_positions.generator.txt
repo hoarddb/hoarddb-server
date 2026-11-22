@@ -1,0 +1,12 @@
+replication_state_before_positions.bson is the replication_state.bson that
+Cluster.saveAppliedState wrote on the starting tree of the positions work
+(main at fb90f7f), for:
+
+  applied position     node-a:7000 -> 41
+  qualified snapshot   node-a:7000, db1/users -> 30
+  bare-name snapshot   node-b:7000, logs -> 12 (written before snapshot positions were qualified by database)
+
+It was produced by a throwaway test in package server on fb90f7f with no other
+edit: newStateTestCluster, markApplied, raise on seededThrough, legacySeeded set
+by hand (recordSeeded writes qualified positions only), saveAppliedState, then
+the bytes of replicationStatePath() copied out. 135 bytes.

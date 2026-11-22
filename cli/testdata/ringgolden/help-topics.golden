@@ -1,0 +1,1420 @@
+##### help create
+create — make a database or a bucket
+====================================
+
+Create a database:
+  create database <name> [{ <options> }]
+
+  create database app                            One copy (this node's default).
+  create database app { replication_factor: 1 }  Say how many copies.
+
+  Options: { replication_factor: <n>, storage: disk }. More than one copy
+  needs that many data nodes: a factor the cluster cannot hold is refused
+  before anything is written. Every database is kept on disk in this build.
+
+Create a bucket:
+  create bucket <name> [in <db>] { <Field> <type>, … }
+
+  create bucket User { Name string, Purchases fifoStore }
+  create bucket Order in shop { Total double, Lines fifoStore, Notes hashStore }
+
+  Declare every field. A field is a scalar (string, int, double, bool,
+  datetime, …) or a store, and a store belongs to each document: every User
+  has its own Purchases queue. A store keeps a sum or a count current when
+  you add with (sum Total, count by Status) after it. Not built yet, so
+  refused: index <IndexName> ( <Field> [desc] ). All the words: help types.
+  Like SQL CREATE TABLE, except a field can be a store each row owns.
+
+Also: help create user.
+
+Next: use app, then db.User.insert({_id_: "ada", Name: "Ada"})
+
+##### help alter
+alter — change a bucket or a user
+=================================
+
+  alter bucket <name> [in <db>] { add <Field> <type>, … }
+
+  alter bucket User { add Email string, drop Age }
+  alter bucket User in app { add Notes hashStore }
+
+  Add fields to a bucket or drop them, in one statement: { add Email string,
+  drop Age }. Adding rewrites no document: every existing document reads the
+  new field as unset, and a store field is empty until its first push.
+  Dropping a field makes it unreadable at once and its values are deleted in
+  the background; the name can be added again later as a new field. A
+  field's type never changes: add a new field, copy the values, drop the old
+  one. Not built yet, so refused: add index <IndexName> ( <Field> [desc], …
+  ) and drop index <IndexName>.
+  Like SQL ALTER TABLE ADD COLUMN and DROP COLUMN, except an add costs
+  nothing however many rows there are.
+
+Also: help alter database, help alter user, help alter user roles.
+
+Next: describe bucket User, to see the fields now in force
+
+##### help drop
+drop — delete a bucket or a user
+================================
+
+  drop bucket <name> [in <db>]
+
+  drop bucket User
+  drop bucket User in app
+
+  Drop a bucket and every document and store it holds. The bucket stops
+  answering at once and the statement returns; its documents are deleted in
+  the background, 'show buckets' lists it as dropping until they are gone,
+  and the name is free to create again then (the new bucket is empty). There
+  is no prompt and no undo: run 'describe bucket' first if you are not sure
+  which bucket this is. Repeating a drop of a dropping bucket is safe, but a
+  drop repeated after it finished and the name was created again drops the
+  new bucket.
+  Like SQL DROP TABLE.
+
+Also: help drop database, help drop user.
+
+Next: show buckets, to watch it leave the list
+
+##### help show
+show — list what exists
+=======================
+
+The databases you can use:
+  show databases [limit <n>] [cursor <hex>]
+
+  show databases
+  show databases limit 10
+
+  List the databases you hold a role on with their id and replication
+  factor, a page at a time; a page that is not the last prints the statement
+  that fetches the next.
+
+A database's buckets:
+  show buckets [in <db>] [limit <n>] [cursor <hex>]
+
+  show buckets in app
+  show buckets
+  show buckets in app limit 10
+
+  List a database's buckets, a page at a time; a page that is not the last
+  prints the statement that fetches the next.
+
+Draw the node summary again:
+  show banner
+
+  show banner
+
+  Draw the box of facts about the node you are connected to: its id,
+  version, uptime, cluster, replication factor and machine.
+
+Also: help show users, help show placement, help show replication.
+
+Next: use app
+
+##### help describe
+describe — look at a database or a bucket
+=========================================
+
+On a bucket (its documents):
+  describe database <name> [limit <n>] [cursor <hex>]
+
+  describe database app
+  describe database app limit 10
+  describe bucket <name> [in <db>]
+
+  describe bucket User in app
+  describe bucket User
+
+On a store field (one document's elements):
+  db.<bucket>["<id>"].<storeField>.describe()
+
+  db.User["ada"].Recipes.describe()
+
+Works on fifoStore, lifoStore, heapStore, hashStore and btreeStore.
+Next: help sum reads one.
+
+##### help db
+db — documents and their stores
+===============================
+
+Every document statement starts with db.<bucket> and runs in the database
+'use' selected. A document's id is its _id_ field.
+
+One document:
+  db.<bucket>["<id>"].get([{…}])                One document by id.
+  db.<bucket>.insert({…})                       Add a document.
+  db.<bucket>.upsert({…})                       Add, or replace the same _id_.
+  db.<bucket>.update({…})                       Change some of its fields.
+  db.<bucket>.delete({…})                       Remove it and its stores.
+Many documents:
+  db.<bucket>.list([{…}])                       Documents, a page at a time.
+  db.<bucket>.count([{…}])                      How many documents.
+A document's own stores:
+  db.<bucket>["<id>"].<storeField>.<verb>([…])  push, pop, peek, claim, put, …
+
+  db.User.insert({_id_: "ada", Name: "Ada"})
+  db.User["ada"].get()
+  db.User.list({filter: {Name: "Ada"}, limit: 10})
+  db.User["ada"].Purchases.push({Item: "coffee"})
+
+Coming from a document store: find({_id_: "ada"}) is db.User["ada"].get();
+find({…}) is db.User.list({filter: {…}}). A store field is written through
+its own verb.
+Next: help insert, help list, help push.
+
+##### help get
+get — read one
+==============
+
+On a bucket (its documents):
+  db.<bucket>["<id>"].get([{…}])
+
+  db.User["ada"].get()
+  db.User["ada"].get({fields: ["Name"]})
+
+On a store field (one document's elements):
+  db.<bucket>["<id>"].<storeField>.get("<key>")
+
+  db.User["ada"].Friends.get("grace")
+
+On a fifoStore or lifoStore get takes the lease id claim printed and prints
+the elements that lease still holds:
+db.User["ada"].Purchases.get("9f2c4e1ab7d34c1e8a0b5d6c7e8f9012").
+Works on fifoStore, lifoStore, hashStore, btreeStore and heapStore.
+Next: help take removes it instead; help claim makes a lease.
+
+##### help list
+list — read many, a page at a time
+==================================
+
+On a bucket (its documents):
+  db.<bucket>.list([{…}])
+
+  db.User.list()
+  db.User.list({limit: 10})
+  db.User.list({filter: {Name: "Ada"}, limit: 10})
+  db.User.list({fields: ["Name", "Age"], limit: 10})
+
+On a store field (one document's elements):
+  db.<bucket>["<id>"].<storeField>.list([{limit: <n>, cursor: "<hex>"}])
+
+  db.User["ada"].Purchases.list({limit: 10})
+
+A page that is not the last ends with a 'more:' line: the same statement
+with the cursor filled in. Run it for the next page.
+Works on fifoStore, lifoStore, heapStore, hashStore and btreeStore.
+Next: help count.
+
+##### help count
+count — how many
+================
+
+On a bucket (its documents):
+  db.<bucket>.count([{…}])
+
+  db.User.count()
+  db.User.count({filter: {Name: "Ada"}})
+
+On a store field (one document's elements):
+  db.<bucket>["<id>"].<storeField>.count([{by: "<Field>"}])
+
+  db.User["ada"].Purchases.count()
+
+On a bucket with 'expire at', count reads one extra key per document, and on
+a store that expires its elements it walks them, because it must skip what
+has expired (help expire).
+Works on fifoStore, lifoStore, heapStore, hashStore, btreeStore and
+blobStore.
+Next: help list.
+
+##### help insert
+insert — add a document
+=======================
+
+  db.<bucket>.insert({…})
+
+  db.User.insert({_id_: "ada", Name: "Ada"})
+
+  Add a document; an existing _id_ is refused. A store field is written
+  through its own verb, never here.
+
+Next: db.User["ada"].get()
+
+##### help upsert
+upsert — add, or replace the same _id_
+======================================
+
+  db.<bucket>.upsert({…})
+
+  db.User.upsert({_id_: "ada", Name: "Ada Lovelace"})
+
+  Add a document or replace the one with the same _id_.
+
+Next: db.User["ada"].get()
+
+##### help update
+update — change some of its fields
+==================================
+
+  db.<bucket>.update({…})
+
+  db.User.update({_id_: "ada", $set: {Name: "Ada King"}})
+  db.User.update({_id_: "ada", $set: {Name: "Ada King"}, $inc: {Age: 1}})
+  db.User.update({_id_: "ada", if: {Name: "Ada"}, $set: {Name: "Ada King"}, return: "after"})
+  db.User.update({_id_: "ada", $inc: {Age: 1}, return: "before"})
+
+  Change fields of the document with this _id_, with update operators ($set,
+  $inc and the rest). All of them apply together or none does. Add if:
+  {Field: value} to change it only while those scalar fields still hold
+  those values (null matches a field that was never set); if one differs
+  nothing changes and you get the current document. Add return: "after" or
+  "before" to get the document back. An upsert takes no if.
+
+Next: db.User["ada"].get()
+
+##### help delete
+delete — remove it and its stores
+=================================
+
+  db.<bucket>.delete({…})
+
+  db.User.delete({_id_: "ada"})
+  db.User.delete({_id_: "ada", if: {Name: "Ada"}})
+
+  Delete the document with this _id_ and the stores it owns. Add if: {Field:
+  value} to delete it only while those scalar fields still hold those
+  values, and return: "before" to get the document as it was.
+
+Next: db.User.count()
+
+##### help grant
+grant — add one grant
+=====================
+
+  grant role <role>@<db> to <user>
+
+  grant role db-manager@app to ada
+  grant role reader@* to ada
+
+  Add one grant. Roles: root, reader, writer, db-manager, user-manager,
+  cluster-manager, backup-operator, restore-operator.
+
+##### help revoke
+revoke — remove one grant
+=========================
+
+  revoke role <role>@<db> from <user>
+
+  revoke role writer@app from ada
+
+  Remove one grant.
+
+##### help user
+user — look at users
+====================
+
+List the users:
+  user list
+
+  user list
+
+  The same as show users.
+
+Look at one user:
+  user describe <name>
+
+  user describe ada
+
+  One user's roles and status.
+
+##### help join
+join — register a running node
+==============================
+
+  join <node>@<host:port>
+
+  join node-b@127.0.0.1:4443
+
+  Register a running node as a member; it seeds, then becomes active.
+
+##### help promote
+promote — make a member a voter
+===============================
+
+  promote <node>
+
+  promote node-b
+
+  Make a member a voter, if the cluster has a free voter slot.
+
+##### help replace-node
+replace-node — reseed a node that lost data
+===========================================
+
+  replace-node <node> --with <node>@<host:port> [--accept-loss]
+
+  replace-node node-b --with node-b@127.0.0.1:4443
+  replace-node node-b --with node-b@127.0.0.1:4443 --accept-loss
+
+  Bring back a member that lost its data: start it again with its node id,
+  keys and address and an empty ring directory, wait until 'nodes' shows it
+  down, then run this on any member. It pulls every pair it owns from the
+  other copies and becomes active when it holds them. The node and its
+  address are its own: --with names the same node. Refused when the node
+  held the only copy of some pairs; --accept-loss replaces it anyway, and
+  those documents are lost.
+
+##### help nodes
+nodes — list the members
+========================
+
+  nodes
+
+  nodes
+
+  List the members with their states and addresses, the voter count and the
+  epoch. Which members are witnesses is not shown yet.
+
+##### help status
+status — slot pulls in progress
+===============================
+
+List the slots this node is copying:
+  status seeding [<db> [<slot>]]
+
+  status seeding
+  status seeding app
+  status seeding app 5
+
+  List every slot this node is copying or keeping: placing (queued),
+  seeding, stalled (no chunk applied for a while) and retired (the slot left
+  this node's copy set and its range waits for its deletion gate), with the
+  node it reads from, how much is copied, how many entries and how long ago
+  the last chunk arrived. A stalled or refused row says why and names the
+  statement that fixes it. Slots that are ready and serving are not listed.
+  Add a database, and a slot, to narrow it; the slot is decimal or 0x hex.
+  It lists up to 2000 rows. Needs the cluster-manager role.
+
+Epoch, leader and lease:
+  status
+
+  status
+
+  Show this node's view: its epoch, the leader it knows, whether it is
+  serving, and the voters.
+
+Next: seeding retry <db> <slot>, for a stalled row
+
+##### help seeding
+seeding — restart or forget a slot's pull
+=========================================
+
+Start a slot's pull again:
+  seeding retry <db> <slot>
+
+  seeding retry app 5
+  seeding retry app 0x0a4e
+
+  Start the pull of one slot again from a fresh cut, on another legal source
+  if there is one. Use it on a row 'status seeding' shows as stalled. The
+  statement returns at once; 'status seeding' shows the new attempt. It is
+  refused, changing nothing, for a slot this node has no seeding record for.
+  Needs the cluster-manager role.
+
+Forget a retired slot:
+  seeding forget <db> <slot> [anyway]
+
+  seeding forget app 5
+  seeding forget app 5 anyway
+
+  Remove the record of a retired slot whose deletion gate waits for a copy
+  that will never come. Its data stays on disk until another copy accepts
+  this node's next pull of the slot or this node leaves the slot's copy set
+  again; either deletes it. Refused, changing nothing, for a slot that is
+  not retired (SEED_HELD), with no record (SEED_NOT_HELD), or retired with
+  no other member holding a copy (SEED_HELD): this node may hold the only
+  copy, so add anyway to forget it. Needs the cluster-manager role.
+
+Next: status seeding <db> <slot>, to watch it
+
+##### help use
+use — work inside a database
+============================
+
+  use <database>
+
+  use app
+
+  Select a database, so 'in <db>' can be left out.
+
+Next: show buckets
+
+##### help set
+set — change how results print
+==============================
+
+  set <setting> [on|off]
+
+  set pretty on
+  set extjson
+  set pager off
+
+  Change how output is printed: pretty (several lines per document), extjson
+  (dates as {"$date": ...}) or pager (a screen at a time). 'set pretty' on
+  its own says what it is.
+
+##### help help
+help — find a statement
+=======================
+
+  help [<topic>]
+
+  help
+  help create bucket
+
+  List the statements, or show one with its examples: help create, help db,
+  help push.
+
+##### help push
+push — add an element to a document's queue or stack
+====================================================
+
+  db.<bucket>["<id>"].<storeField>.push({…})
+      Add one element to a fifoStore (a queue) or a lifoStore (a stack).
+
+  [h]oardDB [app]> db.User["ada"].Purchases.push({Item: "coffee"})
+  OK  pushed: Purchases now holds 1 element
+
+  The document must exist first: db.User.insert({_id_: "ada", Name: "Ada"}).
+  Works on fifoStore and lifoStore. For a hashStore or btreeStore use put
+  (help put). push on a heapStore is not available yet.
+
+Next: db.User["ada"].Purchases.pop() takes it off again (help pop).
+Every store and its verbs: help types.
+
+##### help pop
+pop — remove and return the next elements
+=========================================
+
+  db.<bucket>["<id>"].<storeField>.pop([<n>])
+      Take the next element out of a fifoStore (the oldest), a lifoStore
+      (the newest) or a heapStore and print it, or the next n (1 to 100) in
+      one write.
+
+  [h]oardDB [app]> db.User["ada"].Purchases.push({Item: "coffee"})
+  [h]oardDB [app]> db.User["ada"].Purchases.pop()
+  {"Item": "coffee"}
+
+  An empty store answers NOT_FOUND and names the statement that adds to it.
+  A pop of several must fit about 1 KiB together, or it is refused with the
+  count that fits; claim and ack have no such limit. Works on fifoStore,
+  lifoStore and heapStore.
+
+Next: db.User["ada"].Purchases.count() says how many are left (help count).
+Every store and its verbs: help types.
+
+##### help peek
+peek — read the next elements without removing them
+===================================================
+
+  db.<bucket>["<id>"].<storeField>.peek([<n>])
+      Print the next element, or the next n (1 to 100), and leave them in
+      the store. A heapStore's lines start with the entry id and the
+      priority.
+
+  [h]oardDB [app]> db.User["ada"].Purchases.push({Item: "coffee"})
+  [h]oardDB [app]> db.User["ada"].Purchases.peek()
+  {"Item": "coffee"}
+
+  Works on fifoStore, lifoStore and heapStore.
+
+Next: db.User["ada"].Purchases.pop() takes the next one off (help pop).
+Every store and its verbs: help types.
+
+##### help sum
+sum — read a sum the store keeps current
+========================================
+
+  db.<bucket>["<id>"].<storeField>.sum("<Field>"[, {by: "<Field>"}])
+      Print the sum of one element field over everything the store holds, 0
+      for an empty store. With {by: "<ElementField>"} print one sum and
+      count per value of that field, in value order. The store must declare
+      the aggregate when the bucket is created, as with (sum Amount, sum
+      Amount by Currency).
+
+  [h]oardDB [app]> db.User["ada"].Recipes.sum("Minutes")
+
+  Elements leased by a claim and not yet acked are still in the sum. A sum
+  of doubles drifts by the usual floating-point error; keep money in integer
+  minor units. Pages of a by form end with a 'more:' line. Works on
+  fifoStore, lifoStore, heapStore, hashStore and btreeStore. min and max are
+  not kept: a btreeStore keyed by the value answers first and last for free
+  (help types).
+
+Next: help describe lists every aggregate a store keeps.
+Every store and its verbs: help types.
+
+##### help nearest
+nearest — read the elements closest to a vector
+===============================================
+
+  db.<bucket>["<id>"].<storeField>.nearest({vector: <binary>, k: <n>, ...})
+      Print the k elements (default 10, at most 100) of the store whose
+      vector field is closest to yours, best first, each after its score.
+      The vector is a binary of little-endian float32 values; metric is
+      cosine (the default), dot or l2, set as metric: "l2". field: "<name>"
+      names the element field that holds the vector (default Vector).
+
+  db.User["ada"].Friends.put("grace", {since: 2024, Vector: {"$binary": {"base64": "AACAPwAAAAA=", "subType": "00"}}})
+  db.User["ada"].Friends.nearest({vector: {"$binary": {"base64": "AACAPwAAAAA=", "subType": "00"}}, k: 3})
+  1.000000  grace  {"Vector": {"$binary":{"base64":"AACAPwAAAAA=","subType":"00"}}, "since": 2024}
+
+  Elements without the field are skipped and counted on the last line. Every
+  element must hold a vector of your vector's length, or the call is refused
+  naming the element. The embedding model is yours: hoardDB compares bytes
+  and never calls a model. Works on fifoStore, lifoStore, heapStore,
+  hashStore and btreeStore.
+
+Next: help list reads every element instead.
+Every store and its verbs: help types.
+
+##### help take
+take — remove and return the element under a key
+================================================
+
+  db.<bucket>["<id>"].<storeField>.take("<key>")
+      Remove the element stored under a key and print it.
+
+  [h]oardDB [app]> db.User["ada"].Friends.put("grace", {since: 2024})
+  [h]oardDB [app]> db.User["ada"].Friends.take("grace")
+  {"since": 2024}
+
+  Works on hashStore and btreeStore. take on a heapStore is not available
+  yet.
+
+Next: help put.
+Every store and its verbs: help types.
+
+##### help put
+put — store an element under a key
+==================================
+
+  db.<bucket>["<id>"].<storeField>.put("<key>", {…})
+      Store an element under a key in a hashStore or a btreeStore, replacing
+      any element that key held.
+
+  [h]oardDB [app]> db.User["ada"].Friends.put("grace", {since: 2024})
+  OK  put "grace": Friends now holds 1 element
+
+  The document must exist first. Works on hashStore and btreeStore. For a
+  fifoStore or lifoStore use push (help push). put on a blobStore is not
+  available yet.
+
+Next: db.User["ada"].Friends.take("grace") removes it again (help take).
+Every store and its verbs: help types.
+
+##### help inc
+inc — add to the numbers of an element, creating it
+===================================================
+
+  db.<bucket>["<id>"].<storeField>.inc("<k>", {<p>: <n>}[, {return: "after"}])
+      Add the numbers you give to the element stored under a key in a
+      hashStore or a btreeStore, and create the element when the key is
+      absent. Each path is a field name, or names joined by dots (up to
+      three levels); each number is an int or a double.
+
+  [h]oardDB [app]> db.User["ada"].Friends.inc("grace", {visits: 1})
+  OK  inc "grace": Friends now holds 1 element
+
+  It is one write at the owner, so two callers never lose an add, and a
+  store that keeps aggregates keeps them exact. A counter may go negative. A
+  retry is safe only while its request id is still remembered (by default
+  the last 8192 applied records of the pair); after that it adds again, so
+  read the element before you resend. A path that holds a string is refused.
+  {return: "after"} prints the element as it stands after the add. Money
+  belongs in integer minor units: a decimal is refused. Works on hashStore
+  and btreeStore.
+
+Next: db.User["ada"].Friends.get("grace") reads it back (help get).
+Every store and its verbs: help types.
+
+##### help claim
+claim — lease elements to work on
+=================================
+
+  db.<bucket>["<id>"].<storeField>.claim([<n>])
+      Lease the next element, or the next n, to one worker. An element that
+      is not acked before its lease ends comes back. The first line printed
+      is the lease id.
+
+  [h]oardDB [app]> db.User["ada"].Purchases.claim(1)
+
+  Do the work, then ack the lease id (help ack). To give the elements back
+  at once, release it. Works on fifoStore and lifoStore.
+
+Next: db.User["ada"].Purchases.ack("<lease>") finishes the lease (help ack).
+Every store and its verbs: help types.
+
+##### help ack
+ack — finish a lease and remove its elements
+============================================
+
+  db.<bucket>["<id>"].<storeField>.ack("<lease>")
+      The work under a lease is done: remove its elements for good.
+
+  db.User["ada"].Purchases.ack("9f2c4e1ab7d34c1e8a0b5d6c7e8f9012")
+
+  Works on fifoStore and lifoStore.
+
+Next: help release gives the elements back instead.
+Every store and its verbs: help types.
+
+##### help release
+release — give a lease's elements back
+======================================
+
+  db.<bucket>["<id>"].<storeField>.release("<lease>")
+      Give a lease's elements back to the store now, instead of waiting for
+      the lease to end.
+
+  db.User["ada"].Purchases.release("9f2c4e1ab7d34c1e8a0b5d6c7e8f9012")
+
+  Works on fifoStore and lifoStore.
+
+Next: help extend keeps a lease longer.
+Every store and its verbs: help types.
+
+##### help extend
+extend — keep a lease longer
+============================
+
+  db.<bucket>["<id>"].<storeField>.extend("<lease>", <ms>)
+      Move a lease's deadline to the number of milliseconds from now you
+      give, from 1000 to 3600000.
+
+  db.User["ada"].Purchases.extend("9f2c4e1ab7d34c1e8a0b5d6c7e8f9012", 60000)
+
+  Works on fifoStore and lifoStore.
+
+Next: help ack finishes the lease.
+Every store and its verbs: help types.
+
+##### help types
+Field types
+===========
+
+Scalars (one value per document):
+  string  int32  int  double  decimal  number  bool  datetime  bsontimestamp
+  binary  uuid  objectid  object  array  regex  null  any
+
+Stores (every document owns its own; you pick the structure):
+  fifoStore   a queue: pop takes the oldest  push pop peek list count sum
+                                             nearest claim get
+  lifoStore   a stack: pop takes the newest  push pop peek list count sum
+                                             nearest claim get
+  hashStore   elements by key                list count sum nearest take put inc
+                                             get
+  btreeStore  elements by key, in key order  list count sum nearest take put inc
+                                             get
+  heapStore   elements by priority           pop peek list count sum nearest get
+  blobStore   large values and files         count
+
+  create bucket User in app { Name string, Age int, Photos lifoStore,
+      Friends hashStore, Recipes btreeStore, Books heapStore, Data blobStore }
+
+integer, float, boolean and date are refused; the error names the word to use.
+Next: help create, help push.
+
+##### help all
+hoardDB Query Language (HQL) — Every Statement
+==============================================
+
+'help <word>' shows one statement with examples. Tab completes every word.
+
+Schema Management:
+  create database <name> [{ <options> }]        Make a database.
+  create bucket <name> [in <db>] { <Field> <type>, … }  Declare a bucket.
+  alter bucket <name> [in <db>] { add <Field> <type>, … }  Add or drop fields.
+  drop bucket <name> [in <db>]                  Drop a bucket.
+
+Read Operations:
+  show databases [limit <n>] [cursor <hex>]     The databases you can use.
+  describe database <name> [limit <n>] [cursor <hex>]  Factor and buckets.
+  show buckets [in <db>] [limit <n>] [cursor <hex>]  A database's buckets.
+  describe bucket <name> [in <db>]              A bucket's fields.
+  db.<bucket>["<id>"].get([{…}])                One document by id.
+  db.<bucket>.list([{…}])                       Documents, a page at a time.
+  db.<bucket>.count([{…}])                      How many documents.
+
+Write Operations:
+  db.<bucket>.insert({…})                       Add a document.
+  db.<bucket>.upsert({…})                       Add, or replace the same _id_.
+  db.<bucket>.update({…})                       Change some of its fields.
+  db.<bucket>.delete({…})                       Remove it and its stores.
+
+Store Fields (each document's own; help types):
+  db.<bucket>["<id>"].<storeField>.<verb>([…])  push pop peek list count sum
+                                                describe nearest take put inc
+                                                claim ack release extend get
+
+User Management:
+  create user <name> [roles [<role>@<db>, …]]   Create a user.
+  alter user <name> disable|enable|password     Block, unblock, new password.
+  alter user <name> roles [<role>@<db>, …]      Replace a user's roles.
+  drop user <name>                              Delete a user.
+  grant role <role>@<db> to <user>              Add one grant.
+  revoke role <role>@<db> from <user>           Remove one grant.
+  show users                                    Users, roles and status.
+  user list                                     The same as show users.
+  user describe <name>                          One user's roles and status.
+
+Cluster Management:
+  join <node>@<host:port>                       Register a running node.
+  promote <node>                                Make a member a voter.
+  replace-node <node> --with <node>@<host:port> [--accept-loss]
+                                                Reseed a node that lost data.
+  nodes                                         List the members.
+  status seeding [<db> [<slot>]]                Slot pulls in progress.
+  status                                        Epoch, leader and lease.
+  seeding retry <db> <slot>                     Restart one slot's pull.
+  seeding forget <db> <slot> [anyway]           Drop a retired slot's record.
+
+Session Commands:
+  use <database>                                Work inside a database.
+  show banner                                   Draw the node summary again.
+  set <setting> [on|off]                        pretty, extjson or pager.
+  help [<topic>]                                Quick Start, or one statement.
+  exit                                          Leave; quit works too.
+
+Not available yet:
+  alter database, drop database, leave, remove-node, show placement,
+  show replication
+
+##### help create database
+create database — make a database
+=================================
+
+  create database <name> [{ <options> }]
+
+  create database app                            One copy (this node's default).
+  create database app { replication_factor: 1 }  Say how many copies.
+
+  Options: { replication_factor: <n>, storage: disk }. More than one copy
+  needs that many data nodes: a factor the cluster cannot hold is refused
+  before anything is written. Every database is kept on disk in this build.
+
+##### help alter database
+alter database — change its replication factor
+==============================================
+
+  alter database <name> { <options> }
+
+  Not available yet.
+
+##### help drop database
+drop database — drop a database
+===============================
+
+  drop database <name>
+
+  Not available yet.
+
+##### help create bucket
+create bucket — declare a bucket
+================================
+
+  create bucket <name> [in <db>] { <Field> <type>, … }
+
+  create bucket User { Name string, Purchases fifoStore }
+  create bucket Order in shop { Total double, Lines fifoStore, Notes hashStore }
+
+  Declare every field. A field is a scalar (string, int, double, bool,
+  datetime, …) or a store, and a store belongs to each document: every User
+  has its own Purchases queue. A store keeps a sum or a count current when
+  you add with (sum Total, count by Status) after it. Not built yet, so
+  refused: index <IndexName> ( <Field> [desc] ). All the words: help types.
+  Like SQL CREATE TABLE, except a field can be a store each row owns.
+
+Next: use app, then db.User.insert({_id_: "ada", Name: "Ada"})
+
+##### help alter bucket
+alter bucket — add or drop fields
+=================================
+
+  alter bucket <name> [in <db>] { add <Field> <type>, … }
+
+  alter bucket User { add Email string, drop Age }
+  alter bucket User in app { add Notes hashStore }
+
+  Add fields to a bucket or drop them, in one statement: { add Email string,
+  drop Age }. Adding rewrites no document: every existing document reads the
+  new field as unset, and a store field is empty until its first push.
+  Dropping a field makes it unreadable at once and its values are deleted in
+  the background; the name can be added again later as a new field. A
+  field's type never changes: add a new field, copy the values, drop the old
+  one. Not built yet, so refused: add index <IndexName> ( <Field> [desc], …
+  ) and drop index <IndexName>.
+  Like SQL ALTER TABLE ADD COLUMN and DROP COLUMN, except an add costs
+  nothing however many rows there are.
+
+Next: describe bucket User, to see the fields now in force
+
+##### help drop bucket
+drop bucket — drop a bucket
+===========================
+
+  drop bucket <name> [in <db>]
+
+  drop bucket User
+  drop bucket User in app
+
+  Drop a bucket and every document and store it holds. The bucket stops
+  answering at once and the statement returns; its documents are deleted in
+  the background, 'show buckets' lists it as dropping until they are gone,
+  and the name is free to create again then (the new bucket is empty). There
+  is no prompt and no undo: run 'describe bucket' first if you are not sure
+  which bucket this is. Repeating a drop of a dropping bucket is safe, but a
+  drop repeated after it finished and the name was created again drops the
+  new bucket.
+  Like SQL DROP TABLE.
+
+Next: show buckets, to watch it leave the list
+
+##### help show databases
+show databases — the databases you can use
+==========================================
+
+  show databases [limit <n>] [cursor <hex>]
+
+  show databases
+  show databases limit 10
+
+  List the databases you hold a role on with their id and replication
+  factor, a page at a time; a page that is not the last prints the statement
+  that fetches the next.
+
+Next: use app
+
+##### help describe database
+describe database — factor and buckets
+======================================
+
+  describe database <name> [limit <n>] [cursor <hex>]
+
+  describe database app
+  describe database app limit 10
+
+  Show a database's id and replication factor and a page of its buckets.
+
+Next: describe bucket User
+
+##### help show buckets
+show buckets — a database's buckets
+===================================
+
+  show buckets [in <db>] [limit <n>] [cursor <hex>]
+
+  show buckets in app
+  show buckets
+  show buckets in app limit 10
+
+  List a database's buckets, a page at a time; a page that is not the last
+  prints the statement that fetches the next.
+
+Next: describe bucket User
+
+##### help describe bucket
+describe bucket — a bucket's fields
+===================================
+
+  describe bucket <name> [in <db>]
+
+  describe bucket User in app
+  describe bucket User
+
+  Show a bucket's declaration: its id, state and fields in field-id order.
+
+Next: db.User.list()
+
+##### help get
+get — read one
+==============
+
+On a bucket (its documents):
+  db.<bucket>["<id>"].get([{…}])
+
+  db.User["ada"].get()
+  db.User["ada"].get({fields: ["Name"]})
+
+On a store field (one document's elements):
+  db.<bucket>["<id>"].<storeField>.get("<key>")
+
+  db.User["ada"].Friends.get("grace")
+
+On a fifoStore or lifoStore get takes the lease id claim printed and prints
+the elements that lease still holds:
+db.User["ada"].Purchases.get("9f2c4e1ab7d34c1e8a0b5d6c7e8f9012").
+Works on fifoStore, lifoStore, hashStore, btreeStore and heapStore.
+Next: help take removes it instead; help claim makes a lease.
+
+##### help list
+list — read many, a page at a time
+==================================
+
+On a bucket (its documents):
+  db.<bucket>.list([{…}])
+
+  db.User.list()
+  db.User.list({limit: 10})
+  db.User.list({filter: {Name: "Ada"}, limit: 10})
+  db.User.list({fields: ["Name", "Age"], limit: 10})
+
+On a store field (one document's elements):
+  db.<bucket>["<id>"].<storeField>.list([{limit: <n>, cursor: "<hex>"}])
+
+  db.User["ada"].Purchases.list({limit: 10})
+
+A page that is not the last ends with a 'more:' line: the same statement
+with the cursor filled in. Run it for the next page.
+Works on fifoStore, lifoStore, heapStore, hashStore and btreeStore.
+Next: help count.
+
+##### help count
+count — how many
+================
+
+On a bucket (its documents):
+  db.<bucket>.count([{…}])
+
+  db.User.count()
+  db.User.count({filter: {Name: "Ada"}})
+
+On a store field (one document's elements):
+  db.<bucket>["<id>"].<storeField>.count([{by: "<Field>"}])
+
+  db.User["ada"].Purchases.count()
+
+On a bucket with 'expire at', count reads one extra key per document, and on
+a store that expires its elements it walks them, because it must skip what
+has expired (help expire).
+Works on fifoStore, lifoStore, heapStore, hashStore, btreeStore and
+blobStore.
+Next: help list.
+
+##### help insert
+insert — add a document
+=======================
+
+  db.<bucket>.insert({…})
+
+  db.User.insert({_id_: "ada", Name: "Ada"})
+
+  Add a document; an existing _id_ is refused. A store field is written
+  through its own verb, never here.
+
+Next: db.User["ada"].get()
+
+##### help upsert
+upsert — add, or replace the same _id_
+======================================
+
+  db.<bucket>.upsert({…})
+
+  db.User.upsert({_id_: "ada", Name: "Ada Lovelace"})
+
+  Add a document or replace the one with the same _id_.
+
+Next: db.User["ada"].get()
+
+##### help update
+update — change some of its fields
+==================================
+
+  db.<bucket>.update({…})
+
+  db.User.update({_id_: "ada", $set: {Name: "Ada King"}})
+  db.User.update({_id_: "ada", $set: {Name: "Ada King"}, $inc: {Age: 1}})
+  db.User.update({_id_: "ada", if: {Name: "Ada"}, $set: {Name: "Ada King"}, return: "after"})
+  db.User.update({_id_: "ada", $inc: {Age: 1}, return: "before"})
+
+  Change fields of the document with this _id_, with update operators ($set,
+  $inc and the rest). All of them apply together or none does. Add if:
+  {Field: value} to change it only while those scalar fields still hold
+  those values (null matches a field that was never set); if one differs
+  nothing changes and you get the current document. Add return: "after" or
+  "before" to get the document back. An upsert takes no if.
+
+Next: db.User["ada"].get()
+
+##### help delete
+delete — remove it and its stores
+=================================
+
+  db.<bucket>.delete({…})
+
+  db.User.delete({_id_: "ada"})
+  db.User.delete({_id_: "ada", if: {Name: "Ada"}})
+
+  Delete the document with this _id_ and the stores it owns. Add if: {Field:
+  value} to delete it only while those scalar fields still hold those
+  values, and return: "before" to get the document as it was.
+
+Next: db.User.count()
+
+##### help create user
+create user — create a user
+===========================
+
+  create user <name> [roles [<role>@<db>, …]]
+
+  create user ada roles [reader@app]
+  create user ada
+  create user ada roles [writer@app, reader@logs]
+
+  Create a user. The password is asked twice with no echo, or read from
+  -password-file or -password-stdin, never a flag. A role is <role>@<db>, or
+  <role>@* for every database.
+
+##### help alter user
+alter user — block, unblock, new password
+=========================================
+
+Block, unblock, new password:
+  alter user <name> disable|enable|password
+
+  alter user ada disable
+  alter user ada enable
+  alter user ada password
+
+  Block a user, let it in again, or change its password (asked twice with no
+  echo).
+
+Replace a user's roles:
+  alter user <name> roles [<role>@<db>, …]
+
+  alter user ada roles [writer@app, reader@logs]
+
+  Replace a user's whole role set.
+
+##### help alter user roles
+alter user roles — replace a user's roles
+=========================================
+
+  alter user <name> roles [<role>@<db>, …]
+
+  alter user ada roles [writer@app, reader@logs]
+
+  Replace a user's whole role set.
+
+##### help drop user
+drop user — delete a user
+=========================
+
+  drop user <name>
+
+  drop user ada
+
+  Delete a user.
+
+##### help grant role
+grant role — add one grant
+==========================
+
+  grant role <role>@<db> to <user>
+
+  grant role db-manager@app to ada
+  grant role reader@* to ada
+
+  Add one grant. Roles: root, reader, writer, db-manager, user-manager,
+  cluster-manager, backup-operator, restore-operator.
+
+##### help revoke role
+revoke role — remove one grant
+==============================
+
+  revoke role <role>@<db> from <user>
+
+  revoke role writer@app from ada
+
+  Remove one grant.
+
+##### help show users
+show users — users, roles and status
+====================================
+
+  show users
+
+  show users
+
+  List the users, their roles and status (never a password), and the
+  revision of the user store.
+
+##### help user list
+user list — the same as show users
+==================================
+
+  user list
+
+  user list
+
+  The same as show users.
+
+##### help user describe
+user describe — one user's roles and status
+===========================================
+
+  user describe <name>
+
+  user describe ada
+
+  One user's roles and status.
+
+##### help join
+join — register a running node
+==============================
+
+  join <node>@<host:port>
+
+  join node-b@127.0.0.1:4443
+
+  Register a running node as a member; it seeds, then becomes active.
+
+##### help promote
+promote — make a member a voter
+===============================
+
+  promote <node>
+
+  promote node-b
+
+  Make a member a voter, if the cluster has a free voter slot.
+
+##### help leave
+leave — take a member out
+=========================
+
+  leave <node>
+
+  Not available yet.
+
+##### help remove-node
+remove-node — remove a dead member
+==================================
+
+  remove-node <node>
+
+  Not available yet.
+
+##### help replace-node
+replace-node — reseed a node that lost data
+===========================================
+
+  replace-node <node> --with <node>@<host:port> [--accept-loss]
+
+  replace-node node-b --with node-b@127.0.0.1:4443
+  replace-node node-b --with node-b@127.0.0.1:4443 --accept-loss
+
+  Bring back a member that lost its data: start it again with its node id,
+  keys and address and an empty ring directory, wait until 'nodes' shows it
+  down, then run this on any member. It pulls every pair it owns from the
+  other copies and becomes active when it holds them. The node and its
+  address are its own: --with names the same node. Refused when the node
+  held the only copy of some pairs; --accept-loss replaces it anyway, and
+  those documents are lost.
+
+##### help nodes
+nodes — list the members
+========================
+
+  nodes
+
+  nodes
+
+  List the members with their states and addresses, the voter count and the
+  epoch. Which members are witnesses is not shown yet.
+
+##### help status seeding
+status seeding — slot pulls in progress
+=======================================
+
+  status seeding [<db> [<slot>]]
+
+  status seeding
+  status seeding app
+  status seeding app 5
+
+  List every slot this node is copying or keeping: placing (queued),
+  seeding, stalled (no chunk applied for a while) and retired (the slot left
+  this node's copy set and its range waits for its deletion gate), with the
+  node it reads from, how much is copied, how many entries and how long ago
+  the last chunk arrived. A stalled or refused row says why and names the
+  statement that fixes it. Slots that are ready and serving are not listed.
+  Add a database, and a slot, to narrow it; the slot is decimal or 0x hex.
+  It lists up to 2000 rows. Needs the cluster-manager role.
+
+Next: seeding retry <db> <slot>, for a stalled row
+
+##### help status
+status — slot pulls in progress
+===============================
+
+List the slots this node is copying:
+  status seeding [<db> [<slot>]]
+
+  status seeding
+  status seeding app
+  status seeding app 5
+
+  List every slot this node is copying or keeping: placing (queued),
+  seeding, stalled (no chunk applied for a while) and retired (the slot left
+  this node's copy set and its range waits for its deletion gate), with the
+  node it reads from, how much is copied, how many entries and how long ago
+  the last chunk arrived. A stalled or refused row says why and names the
+  statement that fixes it. Slots that are ready and serving are not listed.
+  Add a database, and a slot, to narrow it; the slot is decimal or 0x hex.
+  It lists up to 2000 rows. Needs the cluster-manager role.
+
+Epoch, leader and lease:
+  status
+
+  status
+
+  Show this node's view: its epoch, the leader it knows, whether it is
+  serving, and the voters.
+
+Next: seeding retry <db> <slot>, for a stalled row
+
+##### help seeding retry
+seeding retry — restart one slot's pull
+=======================================
+
+  seeding retry <db> <slot>
+
+  seeding retry app 5
+  seeding retry app 0x0a4e
+
+  Start the pull of one slot again from a fresh cut, on another legal source
+  if there is one. Use it on a row 'status seeding' shows as stalled. The
+  statement returns at once; 'status seeding' shows the new attempt. It is
+  refused, changing nothing, for a slot this node has no seeding record for.
+  Needs the cluster-manager role.
+
+Next: status seeding <db> <slot>, to watch it
+
+##### help seeding forget
+seeding forget — drop a retired slot's record
+=============================================
+
+  seeding forget <db> <slot> [anyway]
+
+  seeding forget app 5
+  seeding forget app 5 anyway
+
+  Remove the record of a retired slot whose deletion gate waits for a copy
+  that will never come. Its data stays on disk until another copy accepts
+  this node's next pull of the slot or this node leaves the slot's copy set
+  again; either deletes it. Refused, changing nothing, for a slot that is
+  not retired (SEED_HELD), with no record (SEED_NOT_HELD), or retired with
+  no other member holding a copy (SEED_HELD): this node may hold the only
+  copy, so add anyway to forget it. Needs the cluster-manager role.
+
+Next: status seeding <db> <slot>, to confirm
+
+##### help show placement
+show placement — who owns a document
+====================================
+
+  show placement for <id> in <db>.<bucket>
+
+  Not available yet.
+
+##### help show replication
+show replication — each copy's position
+=======================================
+
+  show replication for <db>.<bucket> slot <n>
+
+  Not available yet.
+
+##### help use
+use — work inside a database
+============================
+
+  use <database>
+
+  use app
+
+  Select a database, so 'in <db>' can be left out.
+
+Next: show buckets
+
+##### help show banner
+show banner — draw the node summary again
+=========================================
+
+  show banner
+
+  show banner
+
+  Draw the box of facts about the node you are connected to: its id,
+  version, uptime, cluster, replication factor and machine.
+
+##### help set
+set — change how results print
+==============================
+
+  set <setting> [on|off]
+
+  set pretty on
+  set extjson
+  set pager off
+
+  Change how output is printed: pretty (several lines per document), extjson
+  (dates as {"$date": ...}) or pager (a screen at a time). 'set pretty' on
+  its own says what it is.
+
+##### help help
+help — find a statement
+=======================
+
+  help [<topic>]
+
+  help
+  help create bucket
+
+  List the statements, or show one with its examples: help create, help db,
+  help push.
+
+##### help stores
+Field types
+===========
+
+Scalars (one value per document):
+  string  int32  int  double  decimal  number  bool  datetime  bsontimestamp
+  binary  uuid  objectid  object  array  regex  null  any
+
+Stores (every document owns its own; you pick the structure):
+  fifoStore   a queue: pop takes the oldest  push pop peek list count sum
+                                             nearest claim get
+  lifoStore   a stack: pop takes the newest  push pop peek list count sum
+                                             nearest claim get
+  hashStore   elements by key                list count sum nearest take put inc
+                                             get
+  btreeStore  elements by key, in key order  list count sum nearest take put inc
+                                             get
+  heapStore   elements by priority           pop peek list count sum nearest get
+  blobStore   large values and files         count
+
+  create bucket User in app { Name string, Age int, Photos lifoStore,
+      Friends hashStore, Recipes btreeStore, Books heapStore, Data blobStore }
+
+integer, float, boolean and date are refused; the error names the word to use.
+Next: help create, help push.
+
+##### help frobnicate
+Error: no help for "frobnicate". Topics: create, alter, drop, show, describe, db, get, list, count, insert, upsert, update, delete, grant, revoke, user, join, promote, replace-node, nodes, status, seeding, use, set, help, push, pop, peek, sum, nearest, take, put, inc, claim, ack, release, extend, types, all. Run 'help' for the first five minutes, or 'help all' for every statement.
+
+##### help fifo
+Error: no help for "fifo". Topics: create, alter, drop, show, describe, db, get, list, count, insert, upsert, update, delete, grant, revoke, user, join, promote, replace-node, nodes, status, seeding, use, set, help, push, pop, peek, sum, nearest, take, put, inc, claim, ack, release, extend, types, all. Try 'help types' for the stores.
+

@@ -1,0 +1,7 @@
+{"op": "get",    "coll": "users",    "by": ["_id"]}
+{"op": "list",   "coll": "comments", "by": ["post_id"], "sort": ["ts:asc"], "limit": 20}
+{"op": "insert", "coll": "comments"}
+{"op": "list",   "coll": "comments", "by": ["author_id"], "sort": ["ts:desc"], "limit": 10}
+{"op": "take",   "coll": "jobs",     "by": ["queue"], "order": "oldest"}
+{"op": "range",  "coll": "scores",   "by": ["board"], "key": "score"}
+{"op": "put",    "coll": "avatars",  "by": ["user_id"], "bytes_p50": 180000}

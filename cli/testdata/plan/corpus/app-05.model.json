@@ -1,0 +1,145 @@
+{
+ "version": 1,
+ "source": "agent",
+ "app": "app-05",
+ "kinds": [
+  {
+   "name": "issue",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "repo_id",
+     "type": "string",
+     "present_permille": 1000,
+     "ref": {
+      "to": "repository",
+      "resolve_permille": 1000
+     }
+    }
+   ]
+  },
+  {
+   "name": "repository",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    },
+    {
+     "name": "num_issues",
+     "type": "int",
+     "present_permille": 1000,
+     "role": "counter"
+    }
+   ]
+  },
+  {
+   "name": "action",
+   "documents": 1000,
+   "sampled": 1000,
+   "fields": [
+    {
+     "name": "_id",
+     "type": "string",
+     "present_permille": 1000,
+     "distinct_permille": 1000
+    }
+   ]
+  }
+ ],
+ "trace": [
+  {
+   "op": "list",
+   "coll": "issue",
+   "filters": [
+    {
+     "field": "f0",
+     "optional": true
+    },
+    {
+     "field": "f1",
+     "optional": true
+    },
+    {
+     "field": "f2",
+     "optional": true
+    },
+    {
+     "field": "f3",
+     "optional": true
+    },
+    {
+     "field": "f4",
+     "optional": true
+    },
+    {
+     "field": "f5",
+     "optional": true
+    },
+    {
+     "field": "f6",
+     "optional": true
+    },
+    {
+     "field": "f7",
+     "optional": true
+    },
+    {
+     "field": "f8",
+     "optional": true
+    },
+    {
+     "field": "f9",
+     "optional": true
+    },
+    {
+     "field": "f10",
+     "optional": true
+    },
+    {
+     "field": "f11",
+     "optional": true
+    },
+    {
+     "field": "f12",
+     "optional": true
+    },
+    {
+     "field": "f13",
+     "optional": true
+    },
+    {
+     "field": "f14",
+     "optional": true
+    }
+   ],
+   "sort": [
+    "any:desc"
+   ],
+   "sort_from": "client",
+   "visibility": "container"
+  },
+  {
+   "op": "update",
+   "coll": "repository",
+   "inc": [
+    "num_issues"
+   ]
+  },
+  {
+   "op": "search",
+   "coll": "issue"
+  }
+ ]
+}

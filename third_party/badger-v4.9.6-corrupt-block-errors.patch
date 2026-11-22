@@ -1,0 +1,1045 @@
+diff --git a/corrupt_block_test.go b/corrupt_block_test.go
+new file mode 100644
+index 00000000..7f4de2f7
+--- /dev/null
++++ b/corrupt_block_test.go
+@@ -0,0 +1,410 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package badger
++
++import (
++	"crypto/sha256"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++
++	"github.com/dgraph-io/badger/v4/options"
++	"github.com/dgraph-io/badger/v4/table"
++)
++
++const corruptBlockEntries = 3000
++
++func corruptBlockKey(index int) []byte {
++	return []byte(fmt.Sprintf("key-%05d", index))
++}
++
++// corruptBlockValue is 256 bytes that do not compress, so a block holds a few
++// entries and a flipped byte lands in one of them.
++func corruptBlockValue(index int) []byte {
++	var value []byte
++	seed := corruptBlockKey(index)
++	for len(value) < 256 {
++		digest := sha256.Sum256(seed)
++		value = append(value, digest[:]...)
++		seed = digest[:]
++	}
++	return value[:256]
++}
++
++func corruptBlockOptions(dir string) Options {
++	return getTestOptions(dir).
++		WithChecksumVerificationMode(options.OnBlockRead).
++		WithNumCompactors(0)
++}
++
++// writeTable writes entries [from, to) and closes the DB, which flushes them
++// to a level-0 table of their own.
++func writeTable(t *testing.T, dir string, from, to int) {
++	t.Helper()
++	db, err := Open(corruptBlockOptions(dir))
++	require.NoError(t, err)
++	wb := db.NewWriteBatch()
++	for index := from; index < to; index++ {
++		require.NoError(t, wb.Set(corruptBlockKey(index), corruptBlockValue(index)))
++	}
++	require.NoError(t, wb.Flush())
++	require.NoError(t, db.Close())
++}
++
++func tablesIn(t *testing.T, dir string) []string {
++	t.Helper()
++	tablePaths, err := filepath.Glob(filepath.Join(dir, "*.sst"))
++	require.NoError(t, err)
++	sort.Strings(tablePaths)
++	return tablePaths
++}
++
++// flipByte flips one bit a third of the way into the table, inside its data
++// blocks: the index and its checksum are at the end of the file.
++func flipByte(t *testing.T, tablePath string) {
++	t.Helper()
++	tableBytes, err := os.ReadFile(tablePath)
++	require.NoError(t, err)
++	tableBytes[len(tableBytes)/3] ^= 0x10
++	require.NoError(t, os.WriteFile(tablePath, tableBytes, 0o600))
++}
++
++// openCorruptBlockDB opens a DB of two level-0 tables, keys [0, n) and
++// [n, 2n), with one bit flipped in a data block of the first.
++func openCorruptBlockDB(t *testing.T) *DB {
++	t.Helper()
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	t.Cleanup(func() { removeDir(dir) })
++	writeTable(t, dir, 0, corruptBlockEntries)
++	writeTable(t, dir, corruptBlockEntries, 2*corruptBlockEntries)
++	tablePaths := tablesIn(t, dir)
++	require.Len(t, tablePaths, 2)
++	flipByte(t, tablePaths[0])
++	db, err := Open(corruptBlockOptions(dir))
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, db.Close()) })
++	return db
++}
++
++// TestGetReturnsTheErrorOfACorruptBlock: a Get of a key in a block that fails
++// its checksum returns the error, never ErrKeyNotFound.
++func TestGetReturnsTheErrorOfACorruptBlock(t *testing.T) {
++	db := openCorruptBlockDB(t)
++	var failed int
++	require.NoError(t, db.View(func(txn *Txn) error {
++		for index := 0; index < 2*corruptBlockEntries; index++ {
++			item, err := txn.Get(corruptBlockKey(index))
++			if errors.Is(err, ErrKeyNotFound) {
++				t.Errorf("%s reads as not found: the corrupt block was taken for a missing key", corruptBlockKey(index))
++				continue
++			}
++			if err != nil {
++				require.Contains(t, err.Error(), table.ErrBlockRead.Error())
++				failed++
++				continue
++			}
++			value, err := item.ValueCopy(nil)
++			require.NoError(t, err)
++			require.Equal(t, corruptBlockValue(index), value)
++		}
++		return nil
++	}))
++	require.Positive(t, failed, "no Get reported the corrupt block")
++}
++
++// TestIterationStopsAtACorruptBlock: an iteration in either direction stops
++// at the corrupt block and Error reports it. It must not step over the block
++// to the other table's keys, nor end as though the data ended there.
++func TestIterationStopsAtACorruptBlock(t *testing.T) {
++	db := openCorruptBlockDB(t)
++	for _, reverse := range []bool{false, true} {
++		require.NoError(t, db.View(func(txn *Txn) error {
++			opts := DefaultIteratorOptions
++			opts.Reverse = reverse
++			it := txn.NewIterator(opts)
++			defer it.Close()
++			next, step := 0, 1
++			if reverse {
++				next, step = 2*corruptBlockEntries-1, -1
++			}
++			seen := 0
++			for it.Rewind(); it.Valid(); it.Next() {
++				require.Equal(t, string(corruptBlockKey(next)), string(it.Item().Key()),
++					"reverse=%v: the iteration stepped over keys after %d of them", reverse, seen)
++				next += step
++				seen++
++			}
++			require.Less(t, seen, 2*corruptBlockEntries)
++			require.ErrorIs(t, it.Error(), table.ErrBlockRead, "reverse=%v: iteration stopped after %d keys with no error", reverse, seen)
++			return nil
++		}))
++	}
++}
++
++// TestCompactionKeepsATableWithACorruptBlock: a compaction that cannot read a
++// block of its input fails and keeps the input. Committing it would delete the
++// corrupt table, and with it every key the iteration did not reach.
++func TestCompactionKeepsATableWithACorruptBlock(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	writeTable(t, dir, 0, corruptBlockEntries)
++	writeTable(t, dir, corruptBlockEntries, 2*corruptBlockEntries)
++	tablePaths := tablesIn(t, dir)
++	require.Len(t, tablePaths, 2)
++	flipByte(t, tablePaths[0])
++
++	db, err := Open(corruptBlockOptions(dir))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++
++	// Both tables are in level 0, which Flatten counts as flat already, so
++	// the level-0 compaction is asked for directly.
++	err = db.lc.doCompact(0, compactionPriority{level: 0, score: 1.71, adjusted: 1.71})
++	require.Error(t, err, "a compaction over a corrupt block succeeded")
++	require.Contains(t, err.Error(), table.ErrBlockRead.Error())
++	_, err = os.Stat(tablePaths[0])
++	require.NoError(t, err, "the table with the corrupt block was deleted")
++
++	// The last key of the corrupt table is after the corrupt block: the
++	// compaction would have dropped it.
++	require.NoError(t, db.View(func(txn *Txn) error {
++		item, err := txn.Get(corruptBlockKey(corruptBlockEntries - 1))
++		require.NoError(t, err)
++		value, err := item.ValueCopy(nil)
++		require.NoError(t, err)
++		require.Equal(t, corruptBlockValue(corruptBlockEntries-1), value)
++		return nil
++	}))
++}
++
++// levelTablesAfterCompaction writes two level-0 tables, keys [0, n) and
++// [n, 2n), compacts them into the base level as tables of about 256 KiB, closes
++// the DB and returns the level tables' files in key order. A walk over a level
++// is a ConcatIterator, which the level-0 tests above never reach.
++func levelTablesAfterCompaction(t *testing.T, dir string) []string {
++	t.Helper()
++	writeTable(t, dir, 0, corruptBlockEntries)
++	writeTable(t, dir, corruptBlockEntries, 2*corruptBlockEntries)
++	db, err := Open(corruptBlockOptions(dir).WithBaseTableSize(256 << 10))
++	require.NoError(t, err)
++	// A level-0 compaction takes the tables that overlap its first, and these
++	// two do not overlap, so it runs once for each.
++	for db.lc.levels[0].numTables() > 0 {
++		require.NoError(t, db.lc.doCompact(0, compactionPriority{level: 0, score: 1.71, adjusted: 1.71}))
++	}
++	var levelTables []TableInfo
++	for _, info := range db.Tables() {
++		require.NotZero(t, info.Level, "a level-0 table survived the compaction")
++		levelTables = append(levelTables, info)
++	}
++	require.NoError(t, db.Close())
++	require.GreaterOrEqual(t, len(levelTables), 3, "the compaction wrote too few tables to walk across")
++	sort.Slice(levelTables, func(i, j int) bool { return string(levelTables[i].Left) < string(levelTables[j].Left) })
++	tablePaths := make([]string, len(levelTables))
++	for i, info := range levelTables {
++		tablePaths[i] = table.NewFilename(info.ID, dir)
++	}
++	return tablePaths
++}
++
++// requireWalkStopsWithError walks the whole DB in one direction and requires
++// every key returned to follow the last with none skipped, and the walk to end
++// on table.ErrBlockRead.
++func requireWalkStopsWithError(t *testing.T, db *DB, reverse bool) {
++	t.Helper()
++	require.NoError(t, db.View(func(txn *Txn) error {
++		opts := DefaultIteratorOptions
++		opts.Reverse = reverse
++		it := txn.NewIterator(opts)
++		defer it.Close()
++		next, step := 0, 1
++		if reverse {
++			next, step = 2*corruptBlockEntries-1, -1
++		}
++		seen := 0
++		for it.Rewind(); it.Valid(); it.Next() {
++			require.Equal(t, string(corruptBlockKey(next)), string(it.Item().Key()),
++				"reverse=%v: the walk stepped over keys after %d of them", reverse, seen)
++			next += step
++			seen++
++		}
++		require.Less(t, seen, 2*corruptBlockEntries)
++		require.ErrorIs(t, it.Error(), table.ErrBlockRead, "reverse=%v: the walk ended after %d keys with no error", reverse, seen)
++		return nil
++	}))
++}
++
++// TestALevelWalkStopsAtACorruptBlock: a walk over a level stays on the table
++// whose block failed, in both directions, rather than move on to the next
++// table (ConcatIterator.Next).
++func TestALevelWalkStopsAtACorruptBlock(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	tablePaths := levelTablesAfterCompaction(t, dir)
++	flipByte(t, tablePaths[0])
++
++	db, err := Open(corruptBlockOptions(dir))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++	t.Run("forward", func(t *testing.T) { requireWalkStopsWithError(t, db, false) })
++	t.Run("reverse", func(t *testing.T) { requireWalkStopsWithError(t, db, true) })
++}
++
++// TestAReverseSeekIntoACorruptBlockIsAnError: a reverse iterator that stood in
++// a sound block and then seeks into a corrupt one reports the block, rather
++// than step back through the block it stood in before (Iterator.seekForPrev).
++func TestAReverseSeekIntoACorruptBlockIsAnError(t *testing.T) {
++	db := openCorruptBlockDB(t)
++	damagedKey := -1
++	require.NoError(t, db.View(func(txn *Txn) error {
++		for index := 0; index < corruptBlockEntries && damagedKey < 0; index++ {
++			if _, err := txn.Get(corruptBlockKey(index)); err != nil {
++				damagedKey = index
++			}
++		}
++		return nil
++	}))
++	require.GreaterOrEqual(t, damagedKey, 0, "no key reads from the corrupt block")
++
++	require.NoError(t, db.View(func(txn *Txn) error {
++		opts := DefaultIteratorOptions
++		opts.Reverse = true
++		it := txn.NewIterator(opts)
++		defer it.Close()
++		it.Seek(corruptBlockKey(corruptBlockEntries - 1))
++		require.True(t, it.Valid(), "the seek into a sound block failed: %v", it.Error())
++		it.Seek(corruptBlockKey(damagedKey))
++		if it.Valid() {
++			require.LessOrEqual(t, string(it.Item().Key()), string(corruptBlockKey(damagedKey)),
++				"a reverse seek to %s answered a key after it", corruptBlockKey(damagedKey))
++		}
++		require.ErrorIs(t, it.Error(), table.ErrBlockRead)
++		return nil
++	}))
++}
++
++// TestALevelWalkStopsAtACorruptFirstBlock: a walk that reaches a table whose
++// first block fails stops there, rather than take it for an empty table and
++// move on to the one after (the loop in ConcatIterator.Next).
++func TestALevelWalkStopsAtACorruptFirstBlock(t *testing.T) {
++	dir, err := os.MkdirTemp("", "badger-test")
++	require.NoError(t, err)
++	defer removeDir(dir)
++	tablePaths := levelTablesAfterCompaction(t, dir)
++	tableBytes, err := os.ReadFile(tablePaths[1])
++	require.NoError(t, err)
++	tableBytes[100] ^= 0x10
++	require.NoError(t, os.WriteFile(tablePaths[1], tableBytes, 0o600))
++
++	db, err := Open(corruptBlockOptions(dir))
++	require.NoError(t, err)
++	defer func() { require.NoError(t, db.Close()) }()
++	requireWalkStopsWithError(t, db, false)
++}
++
++// TestADamagedTableIsAnErrorNotAPanicAtEveryOffset inverts one byte at every
++// 997th offset of a table, each in a fresh copy of the DB, and reads every key.
++// Each copy must answer an error, at the open or in the walk, and none may
++// panic. (The table package's TestEveryDamagedBlockByteIsAnErrorNotAPanic
++// damages every byte of every block; this one runs the whole read path.)
++// A block's entry count was decoded before its checksum was compared, so a
++// damaged count drove a slice out of range: on a Get that panicked
++// on the caller's goroutine, and in a compaction it would end the process.
++func TestADamagedTableIsAnErrorNotAPanicAtEveryOffset(t *testing.T) {
++	soundDir := t.TempDir()
++	db, err := Open(sweepOptions(soundDir))
++	require.NoError(t, err)
++	wb := db.NewWriteBatch()
++	for index := 0; index < corruptBlockEntries; index++ {
++		require.NoError(t, wb.Set(corruptBlockKey(index), corruptBlockValue(index)))
++	}
++	require.NoError(t, wb.Flush())
++	require.NoError(t, db.Close())
++	tablePaths := tablesIn(t, soundDir)
++	require.Len(t, tablePaths, 1)
++	soundTable, err := os.ReadFile(tablePaths[0])
++	require.NoError(t, err)
++	soundCopy := t.TempDir()
++	require.NoError(t, os.CopyFS(soundCopy, os.DirFS(soundDir)))
++	answeredError, panicked := readEveryKeyRecovering(t, soundCopy)
++	require.Nil(t, panicked)
++	require.False(t, answeredError, "the undamaged copy answered an error")
++
++	var copies, panics, silent int
++	for offset := 0; offset < len(soundTable); offset += 997 {
++		copies++
++		damagedDir := t.TempDir()
++		require.NoError(t, os.CopyFS(damagedDir, os.DirFS(soundDir)))
++		damagedTable := append([]byte(nil), soundTable...)
++		damagedTable[offset] ^= 0xff
++		require.NoError(t, os.WriteFile(filepath.Join(damagedDir, filepath.Base(tablePaths[0])), damagedTable, 0o600))
++
++		answeredError, panicked := readEveryKeyRecovering(t, damagedDir)
++		switch {
++		case panicked != nil:
++			panics++
++			t.Errorf("byte %d of %d inverted: panicked: %v", offset, len(soundTable), panicked)
++		case !answeredError:
++			silent++
++			t.Errorf("byte %d of %d inverted: every key read back with no error", offset, len(soundTable))
++		}
++		require.NoError(t, os.RemoveAll(damagedDir))
++	}
++	require.Zero(t, panics, "%d of %d damaged copies panicked", panics, copies)
++	require.Zero(t, silent, "%d of %d damaged copies answered no error", silent, copies)
++}
++
++// sweepOptions keeps the memtable and value log files small: allocating them
++// at each open, not the reads, is most of the time of each of the 800-odd
++// copies.
++func sweepOptions(dir string) Options {
++	return corruptBlockOptions(dir).WithMemTableSize(8 << 20).WithValueLogFileSize(4 << 20).WithBlockCacheSize(1 << 20)
++}
++
++// readEveryKeyRecovering opens dir and walks every key, reporting whether
++// the open or the walk answered an error, or what it panicked with. A walk
++// loads each block once, where a Get of every key would load each block once
++// per key in it; both load blocks through Table.block, where the count was
++// decoded. Every key the walk returns must be the next one written, with its
++// value.
++func readEveryKeyRecovering(t *testing.T, dir string) (answeredError bool, panicked any) {
++	defer func() {
++		if recovered := recover(); recovered != nil {
++			panicked = recovered
++		}
++	}()
++	db, err := Open(sweepOptions(dir))
++	if err != nil {
++		return true, nil
++	}
++	defer func() { require.NoError(t, db.Close()) }()
++	require.NoError(t, db.View(func(txn *Txn) error {
++		it := txn.NewIterator(DefaultIteratorOptions)
++		defer it.Close()
++		next := 0
++		for it.Rewind(); it.Valid(); it.Next() {
++			require.Equal(t, string(corruptBlockKey(next)), string(it.Item().Key()), "the walk returned a damaged or out-of-order key with no error")
++			value, err := it.Item().ValueCopy(nil)
++			require.NoError(t, err)
++			require.Equal(t, corruptBlockValue(next), value, "%s read back a damaged value with no error", corruptBlockKey(next))
++			next++
++		}
++		answeredError = it.Error() != nil
++		if !answeredError {
++			require.Equal(t, corruptBlockEntries, next, "the walk ended early with no error")
++		}
++		return nil
++	}))
++	return answeredError, nil
++}
+diff --git a/iterator.go b/iterator.go
+index f57cfa4c..2b81735d 100644
+--- a/iterator.go
++++ b/iterator.go
+@@ -1,6 +1,9 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-05: Iterator.Error reports the
++ * error that ended the iteration. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -565,6 +568,15 @@ func (it *Iterator) Close() {
+ 	it.txn.numIterators.Add(-1)
+ }
+ 
++// Error returns the error that ended the iteration, or nil when it ended
++// because it ran out of keys. Valid turns false in both cases: an iteration
++// stops at a table block it cannot read, for example one that fails its
++// checksum, rather than step over it, so a caller that must not mistake a
++// damaged table for the end of its data checks Error once Valid is false.
++func (it *Iterator) Error() error {
++	return y.IteratorError(it.iitr)
++}
++
+ // Next would advance the iterator by one. Always check it.Valid() after a Next()
+ // to ensure you have access to a valid it.Item().
+ func (it *Iterator) Next() {
+diff --git a/level_handler.go b/level_handler.go
+index c6077e1f..8cafdb1e 100644
+--- a/level_handler.go
++++ b/level_handler.go
+@@ -1,11 +1,16 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-05: levelHandler.get returns the
++ * error a table iterator stopped on instead of reading it as "key not found".
++ * See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"sort"
+ 	"sync"
+@@ -323,6 +328,12 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
+ 		y.NumLSMGetsAdd(s.db.opt.MetricsEnabled, s.strLevel, 1)
+ 		it.Seek(key)
+ 		if !it.Valid() {
++			// Invalid is also what a block that fails its checksum leaves
++			// behind; reading on would answer "not found" for a key that is
++			// stored, so return the error.
++			if err := it.Error(); err != nil {
++				return y.ValueStruct{}, errors.Join(err, decr())
++			}
+ 			continue
+ 		}
+ 		if y.SameKey(key, it.Key()) {
+diff --git a/levels.go b/levels.go
+index e951c8a1..8ab32bc4 100644
+--- a/levels.go
++++ b/levels.go
+@@ -1,6 +1,10 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-05: a compaction whose iterator
++ * stops on a table block it cannot read fails, instead of writing what it read
++ * and deleting the damaged table. See hoardDB/third_party/README.md.
+  */
+ 
+ package badger
+@@ -969,10 +973,15 @@ func (s *levelsController) compactBuildTables(
+ 			return nil, nil, err
+ 		}
+ 		go func(kr keyRange) {
+-			defer inflightBuilders.Done(nil)
++			var readErr error
++			defer func() { inflightBuilders.Done(readErr) }()
+ 			it := table.NewMergeIterator(newIterator(), false)
+ 			defer it.Close()
+ 			s.subcompact(it, kr, cd, inflightBuilders, res)
++			// An iterator that stopped on an unreadable block ended the range
++			// early. Committing would delete the input tables and with them
++			// every key past the damage, so fail the compaction and keep them.
++			readErr = y.IteratorError(it)
+ 		}(kr)
+ 	}
+ 
+diff --git a/table/block_trailer_test.go b/table/block_trailer_test.go
+new file mode 100644
+index 00000000..1cbf85aa
+--- /dev/null
++++ b/table/block_trailer_test.go
+@@ -0,0 +1,195 @@
++/*
++ * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package table
++
++import (
++	"bytes"
++	"fmt"
++	"testing"
++
++	"github.com/dgraph-io/ristretto/v2"
++	"github.com/stretchr/testify/require"
++
++	"github.com/dgraph-io/badger/v4/fb"
++	"github.com/dgraph-io/badger/v4/options"
++	"github.com/dgraph-io/badger/v4/pb"
++	"github.com/dgraph-io/badger/v4/y"
++)
++
++// damageMasks are XORed into one byte at a time: every bit, and one bit low,
++// middle and high.
++var damageMasks = []byte{0xff, 0x01, 0x02, 0x10, 0x80}
++
++// everyMask is all 255 masks. An uncompressed, unencrypted block stores its
++// trailer as it is, so its last trailerSweepBytes bytes (the checksum, its
++// length, the entry count and the last entry offsets) are damaged with every
++// mask: a checksum turns into one naming an unknown algorithm only for a few
++// particular masks, and y.CalculateChecksum panics on that.
++var everyMask = func() []byte {
++	masks := make([]byte, 0, 255)
++	for mask := 1; mask <= 255; mask++ {
++		masks = append(masks, byte(mask))
++	}
++	return masks
++}()
++
++const trailerSweepBytes = 48
++
++// TestEveryDamagedBlockByteIsAnErrorNotAPanic damages each byte of every block
++// of a table in turn, with each of damageMasks, and loads the block. Every
++// load must return an error. A block ends in its entry offsets, its entry
++// count, its checksum and the checksum's length; a damaged count or length
++// used to drive a slice out of range before the checksum was compared, and a
++// damaged checksum could name an algorithm that y.CalculateChecksum panics
++// on. Either panicked on a Get's goroutine and, during a compaction, ended
++// the process.
++//
++// A damaged copy may also load without error when it decodes to the very
++// bytes the sound block does: a compressed copy whose back-reference now
++// points at an equal run of bytes, or a changed zstd header flag. That is
++// not damage to the data, so the sweep accepts it; any other load without
++// an error fails the test.
++func TestEveryDamagedBlockByteIsAnErrorNotAPanic(t *testing.T) {
++	encryptionKey := make([]byte, 32)
++	for index := range encryptionKey {
++		encryptionKey[index] = byte(index)
++	}
++	cases := []struct {
++		name        string
++		compression options.CompressionType
++		dataKey     *pb.DataKey
++	}{
++		{name: "plain", compression: options.None},
++		{name: "snappy", compression: options.Snappy},
++		{name: "zstd", compression: options.ZSTD},
++		{name: "snappy-encrypted", compression: options.Snappy, dataKey: &pb.DataKey{Data: encryptionKey, KeyId: 1}},
++	}
++	indexCache, err := ristretto.NewCache(&ristretto.Config[uint64, *fb.TableIndex]{
++		NumCounters: 1000,
++		MaxCost:     1 << 20,
++		BufferItems: 64,
++	})
++	require.NoError(t, err)
++	defer indexCache.Close()
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			opts := Options{
++				Compression:          tc.compression,
++				ZSTDCompressionLevel: 1,
++				BlockSize:            1024,
++				BloomFalsePositive:   0.01,
++				ChkMode:              options.OnBlockRead,
++				DataKey:              tc.dataKey,
++			}
++			if tc.dataKey != nil {
++				opts.IndexCache = indexCache
++			}
++			tbl := buildTestTable(t, "k", 400, opts)
++			defer func() { require.NoError(t, tbl.DecrRef()) }()
++			sweepEveryBlockByte(t, tbl, tc.compression == options.None && tc.dataKey == nil)
++		})
++	}
++}
++
++// TestADamagedEntryCountWithoutVerificationIsAnErrorNotAPanic covers the
++// bounds check on a block's entry count, which the checksum comparison makes
++// unreachable in the verifying modes: with options.NoVerification nothing
++// compares the checksum first, so a damaged count reaches the slice that
++// holds the entry offsets. Each of its four bytes is damaged with every mask;
++// no load may panic, and a count that cannot fit in the block must be an
++// error. A smaller damaged count loads without error, because nothing
++// verifies the block in this mode.
++func TestADamagedEntryCountWithoutVerificationIsAnErrorNotAPanic(t *testing.T) {
++	opts := Options{
++		Compression:        options.None,
++		BlockSize:          1024,
++		BloomFalsePositive: 0.01,
++		ChkMode:            options.NoVerification,
++	}
++	tbl := buildTestTable(t, "k", 400, opts)
++	defer func() { require.NoError(t, tbl.DecrRef()) }()
++	var loads, errored int
++	for blockIndex := 0; blockIndex < tbl.offsetsLength(); blockIndex++ {
++		var blockOffset fb.BlockOffset
++		require.True(t, tbl.offsets(&blockOffset, blockIndex))
++		blockEnd := int(blockOffset.Offset()) + int(blockOffset.Len())
++		checksumLength := int(y.BytesToU32(tbl.Data[blockEnd-4 : blockEnd]))
++		countStart := blockEnd - 4 - checksumLength - 4
++		for position := countStart; position < countStart+4; position++ {
++			for _, mask := range everyMask {
++				loads++
++				tbl.Data[position] ^= mask
++				_, loadErr, panicked := loadBlockRecovering(tbl, blockIndex)
++				tbl.Data[position] ^= mask
++				require.Nil(t, panicked, "block %d, count byte %d XOR %#02x", blockIndex, position-countStart, mask)
++				if loadErr != nil {
++					errored++
++				}
++			}
++		}
++	}
++	require.Positive(t, loads)
++	require.Positive(t, errored, "no damaged count was refused")
++}
++
++func sweepEveryBlockByte(t *testing.T, tbl *Table, trailerInTheClear bool) {
++	var positions, panics, silent int
++	for blockIndex := 0; blockIndex < tbl.offsetsLength(); blockIndex++ {
++		var blockOffset fb.BlockOffset
++		require.True(t, tbl.offsets(&blockOffset, blockIndex))
++		start := int(blockOffset.Offset())
++		end := start + int(blockOffset.Len())
++		soundBlock, loadErr, panicked := loadBlockRecovering(tbl, blockIndex)
++		require.Nil(t, panicked)
++		require.NoError(t, loadErr)
++		for position := start; position < end; position++ {
++			masks := damageMasks
++			if trailerInTheClear && position >= end-trailerSweepBytes {
++				masks = everyMask
++			}
++			for _, mask := range masks {
++				positions++
++				tbl.Data[position] ^= mask
++				damagedBlock, loadErr, panicked := loadBlockRecovering(tbl, blockIndex)
++				tbl.Data[position] ^= mask
++				switch {
++				case panicked != nil:
++					panics++
++					if panics <= 3 {
++						t.Errorf("block %d, byte %d of [%d, %d) XOR %#02x: the load panicked: %v",
++							blockIndex, position, start, end, mask, panicked)
++					}
++				case loadErr == nil && !bytes.Equal(damagedBlock, soundBlock):
++					silent++
++					if silent <= 3 {
++						t.Errorf("block %d, byte %d of [%d, %d) XOR %#02x: the load returned no error",
++							blockIndex, position, start, end, mask)
++					}
++				}
++			}
++		}
++	}
++	require.Positive(t, positions)
++	require.Zero(t, panics, "%d of %d damaged copies panicked", panics, positions)
++	require.Zero(t, silent, "%d of %d damaged copies loaded with no error", silent, positions)
++}
++
++// loadBlockRecovering loads a block and returns a copy of its decoded bytes,
++// or the error, or what the load panicked with.
++func loadBlockRecovering(tbl *Table, blockIndex int) (decoded []byte, loadErr error, panicked any) {
++	defer func() {
++		if recovered := recover(); recovered != nil {
++			panicked = fmt.Sprint(recovered)
++		}
++	}()
++	blk, loadErr := tbl.block(blockIndex, false)
++	if loadErr != nil {
++		return nil, loadErr, nil
++	}
++	decoded = append([]byte(nil), blk.data...)
++	blk.decrRef()
++	return decoded, nil, nil
++}
+diff --git a/table/iterator.go b/table/iterator.go
+index 772f6396..3504e7ee 100644
+--- a/table/iterator.go
++++ b/table/iterator.go
+@@ -1,12 +1,17 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-05: Iterator and ConcatIterator stop
++ * on a block they cannot read and report it through Error, instead of reading
++ * as the end of the table. See hoardDB/third_party/README.md.
+  */
+ 
+ package table
+ 
+ import (
+ 	"bytes"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"sort"
+@@ -196,6 +201,28 @@ func (itr *Iterator) Valid() bool {
+ 	return itr.err == nil
+ }
+ 
++// ErrBlockRead is wrapped by the error an iterator stops on when a block of
++// its table cannot be read: it fails its checksum, does not decompress or
++// decrypt, or cannot be read from the file.
++var ErrBlockRead = errors.New("a table block could not be read")
++
++// failed reports whether the iterator stopped on an error rather than at the
++// end of its table.
++func (itr *Iterator) failed() bool {
++	return itr.err != nil && itr.err != io.EOF
++}
++
++// Error returns the error the iterator stopped on, naming the table file, or
++// nil when it is valid or ran past the end of the table. Valid is false in
++// both cases: a caller that must not mistake a damaged block for the end of
++// the data asks Error once Valid is false.
++func (itr *Iterator) Error() error {
++	if !itr.failed() {
++		return nil
++	}
++	return fmt.Errorf("%w: table %s: %v", ErrBlockRead, itr.t.Filename(), itr.err)
++}
++
+ func (itr *Iterator) useCache() bool {
+ 	return itr.opt&NOCACHE == 0
+ }
+@@ -303,6 +330,11 @@ func (itr *Iterator) seek(key []byte) {
+ func (itr *Iterator) seekForPrev(key []byte) {
+ 	// TODO: Optimize this. We shouldn't have to take a Prev step.
+ 	itr.seekFrom(key, origin)
++	if itr.failed() {
++		// prev would clear the error and step back from a block that was
++		// never loaded.
++		return
++	}
+ 	if !bytes.Equal(itr.Key(), key) {
+ 		itr.prev()
+ 	}
+@@ -513,6 +545,14 @@ func (s *ConcatIterator) Seek(key []byte) {
+ 	s.cur.Seek(key)
+ }
+ 
++// Error returns the error the current table's iterator stopped on, or nil.
++func (s *ConcatIterator) Error() error {
++	if s.cur == nil {
++		return nil
++	}
++	return s.cur.Error()
++}
++
+ // Next advances our concat iterator.
+ func (s *ConcatIterator) Next() {
+ 	s.cur.Next()
+@@ -520,6 +560,11 @@ func (s *ConcatIterator) Next() {
+ 		// Nothing to do. Just stay with the current table.
+ 		return
+ 	}
++	if s.cur.failed() {
++		// Stay on the table that failed: moving to the next one would step
++		// over the rest of this table as though it were not there.
++		return
++	}
+ 	for { // In case there are empty tables.
+ 		if s.options&REVERSED == 0 {
+ 			s.setIdx(s.idx + 1)
+@@ -531,7 +576,7 @@ func (s *ConcatIterator) Next() {
+ 			return
+ 		}
+ 		s.cur.Rewind()
+-		if s.cur.Valid() {
++		if s.cur.Valid() || s.cur.failed() {
+ 			break
+ 		}
+ 	}
+diff --git a/table/merge_iterator.go b/table/merge_iterator.go
+index b42d79e0..ee1123df 100644
+--- a/table/merge_iterator.go
++++ b/table/merge_iterator.go
+@@ -1,6 +1,10 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-05: a child iterator that stops on
++ * an error stops the merge, which reports it through Error. See
++ * hoardDB/third_party/README.md.
+  */
+ 
+ package table
+@@ -20,12 +24,18 @@ type MergeIterator struct {
+ 
+ 	curKey  []byte
+ 	reverse bool
++	// err is the error a child stopped on. It stops the merge: running on
++	// with the other child would return keys from past the damaged range,
++	// and older versions of keys whose newer ones it could not read.
++	err error
+ }
+ 
+ type node struct {
+ 	valid bool
+ 	key   []byte
+ 	iter  y.Iterator
++	// err is the error iter stopped on, set when valid is false.
++	err error
+ 
+ 	// The two iterators are type asserted from `y.Iterator`, used to inline more function calls.
+ 	// Calling functions on concrete types is much faster (about 25-30%) than calling the
+@@ -43,21 +53,28 @@ func (n *node) setIterator(iter y.Iterator) {
+ }
+ 
+ func (n *node) setKey() {
++	n.err = nil
+ 	switch {
+ 	case n.merge != nil:
+-		n.valid = n.merge.small.valid
++		n.valid = n.merge.Valid()
+ 		if n.valid {
+ 			n.key = n.merge.small.key
++		} else {
++			n.err = n.merge.err
+ 		}
+ 	case n.concat != nil:
+ 		n.valid = n.concat.Valid()
+ 		if n.valid {
+ 			n.key = n.concat.Key()
++		} else {
++			n.err = n.concat.Error()
+ 		}
+ 	default:
+ 		n.valid = n.iter.Valid()
+ 		if n.valid {
+ 			n.key = n.iter.Key()
++		} else {
++			n.err = y.IteratorError(n.iter)
+ 		}
+ 	}
+ }
+@@ -84,7 +101,19 @@ func (n *node) seek(key []byte) {
+ 	n.setKey()
+ }
+ 
++// childFailed records the error a child stopped on, if either did.
++func (mi *MergeIterator) childFailed() bool {
++	mi.err = mi.left.err
++	if mi.err == nil {
++		mi.err = mi.right.err
++	}
++	return mi.err != nil
++}
++
+ func (mi *MergeIterator) fix() {
++	if mi.childFailed() {
++		return
++	}
+ 	if !mi.bigger().valid {
+ 		return
+ 	}
+@@ -100,6 +129,7 @@ func (mi *MergeIterator) fix() {
+ 		if &mi.right == mi.small {
+ 			mi.swapSmall()
+ 		}
++		mi.childFailed()
+ 		return
+ 	case cmp < 0: // Small is less than bigger().
+ 		if mi.reverse {
+@@ -171,7 +201,13 @@ func (mi *MergeIterator) Seek(key []byte) {
+ 
+ // Valid returns whether the MergeIterator is at a valid element.
+ func (mi *MergeIterator) Valid() bool {
+-	return mi.small.valid
++	return mi.small.valid && mi.err == nil
++}
++
++// Error returns the error a child iterator stopped on, or nil. Valid is false
++// once a child has failed.
++func (mi *MergeIterator) Error() error {
++	return mi.err
+ }
+ 
+ // Key returns the key associated with the current iterator.
+diff --git a/table/table.go b/table/table.go
+index f671333d..67094eb7 100644
+--- a/table/table.go
++++ b/table/table.go
+@@ -1,6 +1,13 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-05: Table.block compares a block's
++ * checksum before it decodes the entry count, and bounds-checks the checksum
++ * length and the entry count, so a damaged block trailer is an error instead
++ * of a slice out of range; Block.verifyCheckSum refuses a checksum naming an
++ * unknown algorithm instead of panicking in y.CalculateChecksum.
++ * See hoardDB/third_party/README.md.
+  */
+ 
+ package table
+@@ -239,6 +246,11 @@ func (b *Block) verifyCheckSum() error {
+ 	if err := proto.Unmarshal(b.checksum, cs); err != nil {
+ 		return y.Wrapf(err, "unable to unmarshal checksum for block")
+ 	}
++	// y.CalculateChecksum panics on an algorithm it does not know, and a
++	// damaged checksum can name one.
++	if cs.Algo != pb.Checksum_CRC32C && cs.Algo != pb.Checksum_XXHash64 {
++		return fmt.Errorf("block checksum names unknown algorithm %d: the block is damaged", cs.Algo)
++	}
+ 	return y.VerifyChecksum(b.data, cs)
+ }
+ 
+@@ -571,33 +583,32 @@ func (t *Table) block(idx int, useCache bool) (*Block, error) {
+ 			t.Filename(), blk.offset, ko.Len())
+ 	}
+ 
+-	// Read meta data related to block.
++	// A block ends in its entries, their offsets, the entry count, the
++	// checksum and the checksum's length. The checksum covers everything
++	// before it, so it is compared before the count is decoded: a damaged
++	// count drove the slice below out of range. The bounds are checked as
++	// well, for the modes that do not verify.
++	if len(blk.data) < 8 {
++		return nil, fmt.Errorf("block of %d bytes is too short to hold its trailer: the block is damaged", len(blk.data))
++	}
+ 	readPos := len(blk.data) - 4 // First read checksum length.
+-	blk.chkLen = int(y.BytesToU32(blk.data[readPos : readPos+4]))
++	chkLen := y.BytesToU32(blk.data[readPos : readPos+4])
+ 
+ 	// Checksum length greater than block size could happen if the table was compressed and
+ 	// it was opened with an incorrect compression algorithm (or the data was corrupted).
+-	if blk.chkLen > len(blk.data) {
++	if chkLen > uint32(readPos-4) {
+ 		return nil, errors.New("invalid checksum length. Either the data is " +
+ 			"corrupted or the table options are incorrectly set")
+ 	}
++	blk.chkLen = int(chkLen)
+ 
+ 	// Read checksum and store it
+ 	readPos -= blk.chkLen
+ 	blk.checksum = blk.data[readPos : readPos+blk.chkLen]
+-	// Move back and read numEntries in the block.
+-	readPos -= 4
+-	numEntries := int(y.BytesToU32(blk.data[readPos : readPos+4]))
+-	entriesIndexStart := readPos - (numEntries * 4)
+-	entriesIndexEnd := entriesIndexStart + numEntries*4
+-
+-	blk.entryOffsets = y.BytesToU32Slice(blk.data[entriesIndexStart:entriesIndexEnd])
+-
+-	blk.entriesIndexStart = entriesIndexStart
+ 
+ 	// Drop checksum and checksum length.
+ 	// The checksum is calculated for actual data + entry index + index length
+-	blk.data = blk.data[:readPos+4]
++	blk.data = blk.data[:readPos]
+ 
+ 	// Verify checksum on if checksum verification mode is OnRead on OnStartAndRead.
+ 	if t.opt.ChkMode == options.OnBlockRead || t.opt.ChkMode == options.OnTableAndBlockRead {
+@@ -606,6 +617,17 @@ func (t *Table) block(idx int, useCache bool) (*Block, error) {
+ 		}
+ 	}
+ 
++	// Move back and read numEntries in the block.
++	readPos -= 4
++	numEntries := y.BytesToU32(blk.data[readPos : readPos+4])
++	if numEntries > uint32(readPos/4) {
++		return nil, fmt.Errorf("block gives %d entries, more than its %d bytes can index: the block is damaged",
++			numEntries, readPos)
++	}
++	entriesIndexStart := readPos - int(numEntries)*4
++	blk.entryOffsets = y.BytesToU32Slice(blk.data[entriesIndexStart:readPos])
++	blk.entriesIndexStart = entriesIndexStart
++
+ 	blk.incrRef()
+ 	if useCache && t.opt.BlockCache != nil {
+ 		key := t.blockCacheKey(idx)
+diff --git a/y/iterator.go b/y/iterator.go
+index ec25552b..42144845 100644
+--- a/y/iterator.go
++++ b/y/iterator.go
+@@ -1,6 +1,10 @@
+ /*
+  * SPDX-FileCopyrightText: © 2017-2025 Istari Digital, Inc.
+  * SPDX-License-Identifier: Apache-2.0
++ *
++ * Modified by the hoardDB project, 2026-10-05: IteratorError, so a caller can
++ * tell an iterator that stopped on an error from one that ran out of keys.
++ * See hoardDB/third_party/README.md.
+  */
+ 
+ package y
+@@ -82,3 +86,16 @@ type Iterator interface {
+ 	// All iterators should be closed so that file garbage collection works.
+ 	Close() error
+ }
++
++// IteratorError returns the error iter stopped on, or nil when iter is valid
++// or ran out of keys. Valid is false in both cases, so a caller that must tell
++// a block it could not read from the end of the data asks this once Valid is
++// false. Iterators that can stop on an error implement Error() error; the
++// others never do.
++func IteratorError(iter Iterator) error {
++	failing, ok := iter.(interface{ Error() error })
++	if !ok {
++		return nil
++	}
++	return failing.Error()
++}

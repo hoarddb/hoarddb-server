@@ -1,0 +1,20 @@
+{
+ "version": 1,
+ "source": "hand",
+ "app": "blog",
+ "kinds": [
+  {"name": "users", "documents": 200, "sampled": 200, "fields": [
+   {"name": "_id", "type": "string", "present_permille": 1000, "distinct_permille": 1000},
+   {"name": "name", "type": "string", "present_permille": 1000}]},
+  {"name": "posts", "documents": 2000, "sampled": 2000, "fields": [
+   {"name": "_id", "type": "string", "present_permille": 1000, "distinct_permille": 1000},
+   {"name": "title", "type": "string", "present_permille": 1000},
+   {"name": "author_id", "type": "string", "present_permille": 1000, "ref": {"to": "users", "resolve_permille": 1000}}]},
+  {"name": "comments", "documents": 24000, "sampled": 24000, "fields": [
+   {"name": "_id", "type": "string", "present_permille": 1000, "distinct_permille": 1000},
+   {"name": "post_id", "type": "string", "present_permille": 1000, "ref": {"to": "posts", "resolve_permille": 999}},
+   {"name": "author_id", "type": "string", "present_permille": 1000, "ref": {"to": "users", "resolve_permille": 1000}},
+   {"name": "body", "type": "string", "present_permille": 1000},
+   {"name": "ts", "type": "datetime", "present_permille": 1000}]}
+ ]
+}

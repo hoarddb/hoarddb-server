@@ -1,0 +1,16 @@
+[h]oardDB [app]> promote node-b
+Error: INVALID_ARGUMENT: membership changes are not available on this node yet: set cluster.enabled: true and restart; the join, promote, leave, remove-node and replace-node commands arrive with the cluster membership work
+[h]oardDB [app]> leave node-b
+Error: leave is not available yet: the ring wire carries create database, create bucket, the show and describe statements for databases and buckets, the document and store statements, the user and role statements and the seeding statements, and has no request for it. Run 'help' to list what runs
+[h]oardDB [app]> alter database app { replication_factor: 2 }
+Error: alter database is not available yet: the ring wire carries create database, create bucket, the show and describe statements for databases and buckets, the document and store statements, the user and role statements and the seeding statements, and has no request for it. Run 'help' to list what runs
+[h]oardDB [app]> drop database app
+Error: drop database is not available yet: the ring wire carries create database, create bucket, the show and describe statements for databases and buckets, the document and store statements, the user and role statements and the seeding statements, and has no request for it. Run 'help' to list what runs
+[h]oardDB [app]> frobnicate
+Error: PARSE_ERROR: "frobnicate" is not a statement. Run 'help' to list them, for example 'show databases'
+[h]oardDB [app]> db.User.find()
+Error: PARSE_ERROR: find is not a statement: reading one document has one spelling. Run 'db.User["<id>"].get()' to read a document by id, or 'db.User.list({limit: 10})' to see what exists (the CLI does not run this; 'help' lists the statements it runs)
+[h]oardDB [app]> create bucket
+Error: PARSE_ERROR: cannot read the statement at character 14: found the end of the statement, expected a name. The form is 'create bucket <name> [in <db>] { <Field> <type>, … }'. For example 'create bucket User { Name string, Purchases fifoStore }'. Run 'help create' for every form
+[h]oardDB [app]> db.User["ada"].get(
+Error: PARSE_ERROR: cannot read the statement at character 20: found the end of the statement, expected ")" or "{". The form is 'db.<bucket>["<id>"].get([{…}])'. For example 'db.User["ada"].get()'. Run 'help get' for every form
