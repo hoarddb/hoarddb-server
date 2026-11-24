@@ -170,7 +170,14 @@ func (n *Node) servePosition(env transport.Envelope, body []byte) (*transport.Me
 		return nil, pairReplayingError(n.cfg.NodeID, query.Slot, query.DB)
 	}
 	pair := n.pairs.Snapshot(query.Slot, query.DB)
-	raw, err := EncodePositionReply(PositionReply{Slot: query.Slot, DB: query.DB, State: positionState(n.cl.seeding.Load().slotsView().State(query.Slot, query.DB)), AppliedPos: pair.AppliedPos})
+	state := positionState(n.cl.seeding.Load().slotsView().State(query.Slot, query.DB))
+	if state == PositionStateReady && pair.Flags&flagAwaiting != 0 {
+		// This node's own awaiting hold is open: its record may lack what the copy it waits for
+		// ordered, so it is evidence of what it holds (it raises a target, a catch-up may read
+		// from it) and never a ready copy that answers for an epoch (BUG-0926).
+		state = PositionStateRetired
+	}
+	raw, err := EncodePositionReply(PositionReply{Slot: query.Slot, DB: query.DB, State: state, AppliedPos: pair.AppliedPos})
 	if err != nil {
 		return nil, err
 	}

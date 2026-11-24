@@ -305,8 +305,8 @@ type StorageConfig struct {
 	// bucket count. Zero uses storage's own defaults (128 MB / 64 MB / 4
 	// compactors). Raising the block cache keeps more hot data resident —
 	// a 10M-record bucket outgrowing the 128 MB default measured a 12%
-	// read-throughput drop (bench/RESULTS.md, on the per-bucket layout,
-	// where that cache was the bucket's alone).
+	// read-throughput drop (on the earlier per-bucket layout, where that
+	// cache was the bucket's alone).
 	BadgerBlockCacheMB  int `yaml:"badger_block_cache_mb" env:"HOARDDB_BADGER_BLOCK_CACHE_MB"`
 	BadgerIndexCacheMB  int `yaml:"badger_index_cache_mb" env:"HOARDDB_BADGER_INDEX_CACHE_MB"`
 	BadgerNumCompactors int `yaml:"badger_num_compactors" env:"HOARDDB_BADGER_NUM_COMPACTORS"`

@@ -19,6 +19,10 @@ The tree is still on v1.0's own codec (vendor `go.mongodb.org/mongo-driver` v1.1
 
 ## Commands
 
+The capture is **private-only**: `bench/social` and `bench/propertyshape` below are the benchmark
+harness of the private repository, which is not in the published tree, so `capture.sh` cannot be re-run
+from it. The corpus and this record are published for the oracle tests that read them.
+
 All from `hoardDB/`, `GOWORK=off`, by `bash internal/bsonoracle/testdata/v1corpus/capture.sh`
 (raw records went to a scratch directory, `$BSONCORPUS_OUT` per phase):
 

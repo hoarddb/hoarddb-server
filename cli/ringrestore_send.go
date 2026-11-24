@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/hoarddb/hoarddb-bson/bson"
 
@@ -95,13 +96,12 @@ func (t clientRestoreTransport) NextRequestID() [16]byte { return t.client.NextR
 func (t clientRestoreTransport) close() error { return t.client.Close() }
 
 // Send implements restoreTransport. An operation the client cannot build (a field the bucket
-// does not declare, a value it cannot encode) is that operation's refusal and the frame is
-// not sent at all: every refused operation stops a restore, and a part of a frame sent
-// without it would push into a document whose insert never went out.
+// does not declare, a value it cannot encode, a header it could not learn) is that operation's
+// refusal and the frame is not sent at all (queueRestoreOps): a part of a frame sent without it
+// would push into a document whose insert never went out.
 func (t clientRestoreTransport) Send(ctx context.Context, ops []restoreOp, id [16]byte) ([]ringDocAnswer, error) {
 	batch := t.client.NewBatch()
-	answers := make([]ringDocAnswer, len(ops))
-	for index, op := range ops {
+	unsent := queueRestoreOps(ops, func(op restoreOp) error {
 		bucket := t.client.Bucket(op.database, op.bucket).In(batch)
 		var err error
 		switch op.kind {
@@ -114,10 +114,10 @@ func (t clientRestoreTransport) Send(ctx context.Context, ops []restoreOp, id [1
 		case restorePushHeap:
 			_, err = bucket.PushHeap(ctx, op.id, op.field, op.key, op.priority, op.element)
 		}
-		if err != nil {
-			answers[index].Err = err
-			return answers, nil
-		}
+		return err
+	})
+	if unsent != nil {
+		return unsent, nil
 	}
 	result, err := batch.Send(ctx, ringclient.WithRequestID(id))
 	if err != nil {
@@ -125,6 +125,44 @@ func (t clientRestoreTransport) Send(ctx context.Context, ops []restoreOp, id [1
 	}
 	return restoreAnswersOf(result), nil
 }
+
+// queueRestoreOps queues each operation through queue, in order. It returns nil when every
+// operation was queued, and otherwise the answers of a frame that is not sent: the refusal of
+// the operation that could not be queued in its place, and for every other operation a
+// restoreNotSentError that wraps it. No answer may be empty, because an empty answer reads as
+// applied: the order guard would see a push applied behind the refusal, and the insert step
+// would count the other entities as orphans, though nothing was sent.
+func queueRestoreOps(ops []restoreOp, queue func(restoreOp) error) []ringDocAnswer {
+	for index, op := range ops {
+		err := queue(op)
+		if err == nil {
+			continue
+		}
+		answers := make([]ringDocAnswer, len(ops))
+		for other := range answers {
+			answers[other].Err = &restoreNotSentError{index: index, op: op, cause: err}
+		}
+		answers[index].Err = err
+		return answers
+	}
+	return nil
+}
+
+// restoreNotSentError is the answer of an operation whose frame was not sent because another
+// operation could not be queued. It unwraps to that refusal, so it is judged as that refusal is:
+// a lapsed lease is waited out and the frame sent again, a field the bucket does not declare
+// stops the restore.
+type restoreNotSentError struct {
+	index int
+	op    restoreOp
+	cause error
+}
+
+func (e *restoreNotSentError) Error() string {
+	return fmt.Sprintf("not sent: operation %d of the frame, %s, could not be queued, so the frame did not go out: %v", e.index, e.op.describe(), e.cause)
+}
+
+func (e *restoreNotSentError) Unwrap() error { return e.cause }
 
 // restoreAnswersOf turns a batch result into the answers the sender judges: a refusal stays
 // a refusal, and a write the owner did not decide becomes one that clears by waiting. The
@@ -214,16 +252,44 @@ func (s *restoreSender) send(ctx context.Context, ops []restoreOp) ([]ringDocAns
 	id := s.transport.NextRequestID()
 	s.lastResent = false
 	var lost error
+	var quorumRefusals int
+	var quorumWaited bool
+	var firstQuorumRefusal time.Time
 	for attempt := 0; attempt <= ringMaxResends; attempt++ {
-		if attempt > 0 {
+		if attempt > 0 && !quorumWaited {
 			s.lastResent = true
 			s.resends++
 			if err := s.pause(ctx, attempt); err != nil {
 				return nil, err
 			}
 		}
+		quorumWaited = false
 		answers, err := s.transport.Send(ctx, ops, id)
 		switch {
+		case err == nil && anyQuorumRefusal(answers):
+			// NO_QUORUM and LEASE_LAPSED mean the owner applied nothing and clear within moments,
+			// so the frame is sent again under the same id for the quorum bound without spending
+			// the few resends of the other transient answers. A frame answered both ways keeps
+			// the order guard below.
+			if ops[0].kind != restoreInsert && transientBeforeApplied(ops, answers) {
+				return nil, &restoreOutOfOrderError{operations: len(ops), first: ops[0]}
+			}
+			if quorumRefusals == 0 {
+				firstQuorumRefusal = time.Now()
+			}
+			quorumRefusals++
+			if time.Since(firstQuorumRefusal) >= ringDumpQuorumBound {
+				return answers, nil
+			}
+			if err := waitForQuorumRetry(ctx, quorumRefusals); err != nil {
+				return nil, err
+			}
+			s.lastResent = true
+			s.resends++
+			// The wait is not one of the few resends of other transient answers, and it has
+			// already paused.
+			quorumWaited = true
+			attempt--
 		case err == nil:
 			// An answer that clears by waiting (a slot that is moving, an owner that is down,
 			// an operation the frame's deadline never reached) is not a refusal: the frame is
@@ -231,10 +297,11 @@ func (s *restoreSender) send(ctx context.Context, ops []restoreOp) ([]ringDocAns
 			if attempt < ringMaxResends && anyTransient(answers) {
 				// A whole-frame resend runs the operation that was not applied after the
 				// ones that were, so a transient answer in front of an applied operation
-				// of a store frame could invert a queue's order (a batch goes on after a
-				// refused operation). That is not resent: the restore stops, outcome
-				// unknown. A transient answer with nothing applied behind it (the frame's
-				// deadline reached only its tail) is safe to resend.
+				// on the same store could invert a queue's order. The server refuses every
+				// later operation on a store behind a refused or unconfirmed one, so this
+				// server never answers that way; should a frame come back so anyway, it is
+				// not resent: the restore stops, outcome unknown. A transient answer with
+				// nothing applied behind it on its store is safe to resend.
 				if ops[0].kind != restoreInsert && transientBeforeApplied(ops, answers) {
 					return nil, &restoreOutOfOrderError{operations: len(ops), first: ops[0]}
 				}
@@ -255,6 +322,16 @@ func (s *restoreSender) send(ctx context.Context, ops []restoreOp) ([]ringDocAns
 	return nil, &restoreUnknownError{operations: len(ops), first: ops[0], cause: lost}
 }
 
+// anyQuorumRefusal reports whether some answer is a refusal for a lost majority or a lapsed lease.
+func anyQuorumRefusal(answers []ringDocAnswer) bool {
+	for _, answer := range answers {
+		if answer.Err != nil && ringDumpQuorumRefusal(answer.Err) {
+			return true
+		}
+	}
+	return false
+}
+
 // reconnect replaces the dead connection with a fresh one.
 func (s *restoreSender) reconnect(ctx context.Context) error {
 	fresh, err := s.redial(ctx)
@@ -269,10 +346,12 @@ func (s *restoreSender) reconnect(ctx context.Context) error {
 // transientBeforeApplied reports whether some operation answered with a refusal that clears
 // by waiting while a LATER operation on the same store of the same entity was applied. Only
 // that order can be seen: a frame holds the operations of many entities, and the server runs
-// the operations of different slots in parallel and goes on after a refused one, so a slot
-// that is moving makes its operations come back transient while others in the frame apply,
-// which is normal and is resent. For one store, a whole-frame resend runs the not-applied
-// push after the applied one, which reorders a fifo or lifo (arrival order) and a heap (the
+// the operations of different slots in parallel and goes on after a refused one on another
+// store, so a slot that is moving makes its operations come back transient while others in the
+// frame apply, which is normal and is resent. On one store the server refuses every operation
+// behind a refused one or one whose outcome is unknown (restoreUnconfirmed), so this guard is a
+// backstop that a correct server never trips. For one store, a whole-frame resend runs the
+// not-applied push after the applied one, which reorders a fifo or lifo (arrival order) and a heap (the
 // order of equal priorities); a put of distinct keys into a hash or btree commutes, and only
 // a put of the same key twice would not.
 func transientBeforeApplied(ops []restoreOp, answers []ringDocAnswer) bool {

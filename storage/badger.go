@@ -12,8 +12,8 @@ import (
 
 // BadgerInstance wraps a BadgerDB instance of its own. No server path opens
 // one: every bucket lives on the node's store (OpenBadgerKV). It is kept for
-// bench/bucketdensity, whose retired-layout modes measure the per-bucket
-// instances the server used to open, with the same options.
+// tools that measure the per-bucket instances the server used to open,
+// with the same options.
 type BadgerInstance struct {
 	DB   *badger.DB
 	Path string

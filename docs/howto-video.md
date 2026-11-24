@@ -134,7 +134,7 @@ If one of those is on your hot path, this is not the layout for it, and the
 ## Try it
 
 Start a server and seed the layout as described on the [How-to](howto.md) page,
-with `-layout video`. The transcript below was captured against that data:
+with `hoarddb seed video`. The transcript below was captured against that data:
 twenty channels with five uploads each, forty viewers, a hundred videos with
 eight comments and six likes each, and progress, history and playlists for every
 viewer.
@@ -214,10 +214,10 @@ The viewer's home page: progress, a playlist in order, and the history count.
 
 ```
 [h]oardDB [scenarios_video]> db.Viewer["w5"].Progress.list({limit: 3})
+v17  {"position": 600, "watched_at": 1700400000}
 v21  {"position": 1844, "watched_at": 1700128227}
 v32  {"position": 3117, "watched_at": 1700187916}
-v34  {"position": 1370, "watched_at": 1700124474}
-more: db.Viewer["w5"].Progress.list({limit: 3, cursor: "507633340000"})
+more: db.Viewer["w5"].Progress.list({limit: 3, cursor: "507633320000"})
 [h]oardDB [scenarios_video]> db.Viewer["w5"].Playlists.list({limit: 5})
 favorites/0000  {"added": 1700390000, "video": "v80"}
 favorites/0001  {"added": 1700390060, "video": "v2"}

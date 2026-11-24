@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hoarddb/hoarddb-bson/bson"
+
 	"github.com/hoarddb/hoarddb-server/cluster"
 	"github.com/hoarddb/hoarddb-server/cluster/wire"
 	"github.com/hoarddb/hoarddb-server/transport"
@@ -400,4 +402,32 @@ func (c *Client) membership(ctx context.Context, request wire.RingAdminRequest) 
 		return MembershipResult{}, fmt.Errorf("ringclient: the server answered %s without a result. Check that the server is a hoarddb server of this version", request.Cmd)
 	}
 	return MembershipResult{Epoch: reply.Membership.Epoch, StateSeq: reply.Membership.StateSeq, Result: reply.Membership.Result}, nil
+}
+
+// EarlierStoreBuckets returns how many buckets the node's earlier single-node store holds: the
+// store the legacy opcodes write (the public Node and Python drivers, the Go driver's root
+// package), which the ring requests never read. It asks HEALTH_CHECK, which every session may
+// send, and reads its bucket_count; ring buckets are not counted there. A tool that copies the
+// ring (dump) asks every member, so it can say that such data is not in its copy.
+func (c *Client) EarlierStoreBuckets(ctx context.Context) (int64, error) {
+	request, err := bson.Marshal(bson.D{})
+	if err != nil {
+		return 0, fmt.Errorf("ringclient: encoding the health request: %w", err)
+	}
+	frame, err := c.roundtrip(ctx, transport.OpHealthCheck, c.NextRequestID(), request)
+	if err != nil {
+		return 0, fmt.Errorf("health check: %w", err)
+	}
+	if frame.Opcode != transport.OpGetResponse {
+		return 0, fmt.Errorf("ringclient: the health check was answered with opcode %s, want %s", frame.Opcode, transport.OpGetResponse)
+	}
+	count, err := bson.Raw(frame.Payload).LookupErr("bucketcount")
+	if err != nil {
+		return 0, fmt.Errorf("ringclient: the health reply has no bucket count: %w", err)
+	}
+	buckets, ok := count.AsInt64OK()
+	if !ok {
+		return 0, fmt.Errorf("ringclient: the health reply's bucket count is a %s, not a number", count.Type)
+	}
+	return buckets, nil
 }

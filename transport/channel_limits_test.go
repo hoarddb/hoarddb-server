@@ -7,6 +7,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -133,6 +134,45 @@ func TestAChannelServerRefusesRequestsPastMaxInFlight(t *testing.T) {
 	}
 	if _, err := second.Call(ctx, Message{Env: Envelope{Version: EnvelopeVersion, Kind: 0x03}}); err != nil {
 		t.Fatalf("the refused peer's retry on the same connection failed: %v", err)
+	}
+}
+
+// TestAChannelServerFreesItsSlotBeforeItWritesTheReply (BUG-0921): MaxInFlight limits requests
+// being handled, so a peer that never reads its large reply does not keep the only slot while
+// the server is blocked writing it. The second request is refused while the handler runs, so it
+// is retried until the first handler has returned; before the fix the blocked write keeps the
+// slot, and every retry is refused until the test gives up.
+func TestAChannelServerFreesItsSlotBeforeItWritesTheReply(t *testing.T) {
+	var calls atomic.Int32
+	server := stepTwoBServe(t, ChannelLimits{MaxInFlight: 1, FrameTimeout: time.Minute},
+		func(context.Context, Handshake, Message) (*Message, error) {
+			if calls.Add(1) == 1 {
+				return &Message{Env: Envelope{Version: EnvelopeVersion, Kind: 0x03}, Body: bytes.Repeat([]byte{1}, 30<<20)}, nil
+			}
+			return nil, nil
+		})
+	stalled := stepTwoBHello(t, server.Addr().String())
+	if err := WriteFrame(stalled, NewFrame(OpReplPush, EncodeEnvelope(Envelope{Version: EnvelopeVersion, Kind: 0x03}))); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	second := NewChannelClient(server.Addr().String(), ChannelData, func() Handshake { return Handshake{NodeID: "n8", Incarnation: 1} })
+	t.Cleanup(func() { _ = second.Close() })
+	for {
+		_, err := second.Call(ctx, Message{Env: Envelope{Version: EnvelopeVersion, Kind: 0x03}})
+		var refused *WireError
+		if err == nil {
+			return
+		}
+		if !errors.As(err, &refused) || refused.Code != ErrOverloaded {
+			t.Fatalf("the second request failed with %v, want it admitted", err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("the second request was refused as overloaded for as long as the first reply was being written")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 

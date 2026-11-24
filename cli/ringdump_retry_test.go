@@ -334,3 +334,102 @@ func TestDumpRetryWaitStopsOnInterrupt(t *testing.T) {
 		t.Fatalf("cancelling the run did not end the retry wait within 10s; the wait polls ringDumpPageRetryWait (%s) without selecting on the context", ringDumpPageRetryWait)
 	}
 }
+
+// dumpRetryQuorumRefusal is a refusal a member answers while it has not seen a majority for
+// three heartbeats, or has not renewed its lease: the stall of a moment, not a membership
+// change.
+func dumpRetryQuorumRefusal(code cluster.Code) error {
+	if code == cluster.CodeLeaseLapsed {
+		return &ringclient.Error{Code: code, Message: "node node-a stopped serving reads and writes 90 ms ago because it could not renew its lease. Run 'nodes', then retry."}
+	}
+	return &ringclient.Error{Code: code, Message: "this node cannot see a majority of the cluster's 3 voters, so it refuses reads and writes. Run 'nodes' to see which voters are down, and retry when a majority answers"}
+}
+
+// dumpShortQuorumRetry shortens the quorum retry's waits and bound for one test.
+func dumpShortQuorumRetry(t *testing.T, bound time.Duration) {
+	t.Helper()
+	base, ceiling, previousBound := ringDumpQuorumBackoffBase, ringDumpQuorumBackoffMax, ringDumpQuorumBound
+	ringDumpQuorumBackoffBase, ringDumpQuorumBackoffMax, ringDumpQuorumBound = time.Millisecond, 4*time.Millisecond, bound
+	t.Cleanup(func() {
+		ringDumpQuorumBackoffBase, ringDumpQuorumBackoffMax, ringDumpQuorumBound = base, ceiling, previousBound
+	})
+}
+
+// TestDumpWaitsOutABriefLossOfQuorum: a page refused NO_QUORUM or LEASE_LAPSED twice and then
+// answered is asked for again with the same cursor, the dump exits 0, and its records are the
+// same as a dump that was never refused. Each entity is still read once.
+func TestDumpWaitsOutABriefLossOfQuorum(t *testing.T) {
+	referencePath := filepath.Join(t.TempDir(), "reference.hoarddump")
+	if code, stdout, stderr := runStubDump(t, dumpRetryStub(t), "--db", "app", "--parallel", "1", "--out", referencePath); code != ExitOK {
+		t.Fatalf("dumping the fixture without failures: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	reference := readDumpRecords(t, referencePath)
+
+	for _, refused := range []cluster.Code{cluster.CodeNoQuorum, cluster.CodeLeaseLapsed} {
+		t.Run(refused.String(), func(t *testing.T) {
+			dumpShortQuorumRetry(t, 10*time.Second)
+			stub := dumpRetryStub(t)
+			stub.failuresFirst = map[string]failFirst{
+				"ListDocuments app/Jobs":         {count: 2, err: dumpRetryQuorumRefusal(refused)},
+				"StoreList app/Jobs/job-1/Queue": {skip: 1, count: 2, err: dumpRetryQuorumRefusal(refused)},
+			}
+			outPath := filepath.Join(t.TempDir(), "retried.hoarddump")
+			code, stdout, stderr := runStubDump(t, stub, "--db", "app", "--parallel", "1", "--out", outPath)
+			if code != ExitOK {
+				t.Fatalf("a page refused %s twice and then answered: exit %d, want %d\nstdout: %s\nstderr: %s", refused, code, ExitOK, stdout, stderr)
+			}
+			calls := stub.callCounts()
+			if want := 4; calls.ListDocuments != want {
+				t.Errorf("ListDocuments was called %d times, want %d: two refusals and the two pages", calls.ListDocuments, want)
+			}
+			if want := 4; calls.storeListCallsFor("app/Jobs/job-1/Queue") != want {
+				t.Errorf("StoreList was called %d times for the queue, want %d: two pages and two refusals of the second", calls.storeListCallsFor("app/Jobs/job-1/Queue"), want)
+			}
+			// The header's created time and the footer's checksum differ; the records between
+			// them are what two dumps of one quiet ring share.
+			got := readDumpRecords(t, outPath)
+			if len(got) != len(reference) || !reflect.DeepEqual(got[1:len(got)-1], reference[1:len(reference)-1]) {
+				t.Errorf("the retried dump's records differ from the dump that was never refused")
+			}
+		})
+	}
+}
+
+// TestDumpStopsWhenQuorumStaysLostPastTheBound: a member that answers NO_QUORUM on every try
+// ends the dump after the bound with exit 8, no file, and the refusal's own text, which names
+// the fix.
+func TestDumpStopsWhenQuorumStaysLostPastTheBound(t *testing.T) {
+	dumpShortQuorumRetry(t, 50*time.Millisecond)
+	stub := dumpRetryStub(t)
+	stub.failures = map[string]error{"ListDocuments app/Jobs": dumpRetryQuorumRefusal(cluster.CodeNoQuorum)}
+	outDir := t.TempDir()
+	code, stdout, stderr := runStubDump(t, stub, "--db", "app", "--parallel", "1", "--out", filepath.Join(outDir, "never.hoarddump"))
+	if code != cluster.CodeNoQuorum.Exit() {
+		t.Fatalf("a member that never regains its majority: exit %d, want %d\nstdout: %s\nstderr: %s", code, cluster.CodeNoQuorum.Exit(), stdout, stderr)
+	}
+	if want := "this node cannot see a majority of the cluster's 3 voters"; !strings.Contains(stderr, want) {
+		t.Errorf("the refusal does not carry its own text %q:\n%s", want, stderr)
+	}
+	if entries, err := os.ReadDir(outDir); err != nil || len(entries) != 0 {
+		t.Errorf("the refused dump left files in %s: %v, %v", outDir, entries, err)
+	}
+}
+
+// TestDumpWaitsOutALossOfQuorumInItsListings: the listings and declarations a dump reads before
+// any page are asked again like a page is, so a stall there does not end the run.
+func TestDumpWaitsOutALossOfQuorumInItsListings(t *testing.T) {
+	dumpShortQuorumRetry(t, 10*time.Second)
+	stub := dumpRetryStub(t)
+	refusal := dumpRetryQuorumRefusal(cluster.CodeNoQuorum)
+	stub.failuresFirst = map[string]failFirst{
+		"ShowDatabases":           {count: 2, err: refusal},
+		"DescribeDatabase app":    {count: 2, err: refusal},
+		"ShowBuckets app":         {count: 2, err: refusal},
+		"DescribeBucket app/Jobs": {count: 2, err: refusal},
+	}
+	outPath := filepath.Join(t.TempDir(), "listed.hoarddump")
+	code, stdout, stderr := runStubDump(t, stub, "--db", "app", "--parallel", "1", "--out", outPath)
+	if code != ExitOK {
+		t.Fatalf("listings refused NO_QUORUM twice and then answered: exit %d, want %d\nstdout: %s\nstderr: %s", code, ExitOK, stdout, stderr)
+	}
+}

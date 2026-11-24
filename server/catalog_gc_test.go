@@ -280,8 +280,8 @@ func measureOnce(b *testing.B, key string, measure func() map[string]float64) {
 // delta, the resident bytes per bucket rule 11 asks for.
 //
 // Nothing here asserts a number: a time asserted by go test fails on a loaded
-// host and teaches people to ignore it (catalog GC spec 8). The numbers are
-// recorded in bench/RESULTS.md with the host and its load beside them.
+// host and teaches people to ignore it (catalog GC spec 8). Record the numbers
+// with the host and its load beside them.
 //
 //	go test -run XXX -bench 'BenchmarkCatalogGCMark' -benchtime=1x ./server/
 //	HOARDDB_CATALOG_1M=1 go test -run XXX -bench 'BenchmarkCatalogGCMark/plain/N=1000000' -benchtime=1x -timeout 30m ./server/

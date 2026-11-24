@@ -1387,7 +1387,7 @@ func (w *Writer) refusalFor(code cluster.Code, req WriteRequest, pos cluster.Pos
 		"epoch":  strconv.FormatUint(w.cfg.Topology.Committed(), 10),
 		"seq":    strconv.FormatUint(pos.Seq, 10),
 	}
-	args["v"], args["n"] = strconv.Itoa(w.cfg.Topology.Members()), "too few"
+	args["v"] = strconv.Itoa(w.cfg.Topology.Members())
 	if seen != 0 {
 		args["e_seen"], args["kind"], args["owner"] = strconv.FormatUint(seen, 10), "request", w.cfg.Topology.Self()
 	}

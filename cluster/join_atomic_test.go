@@ -138,13 +138,26 @@ func TestLeaderLossBetweenAddNonvoterAndRegisterLeavesNoPhantom(t *testing.T) {
 	}
 }
 
-// capCluster is a leader with n2 promoted and every id in joiners registered as a nonvoter.
+// steadyTimeouts gives a node election and lease timeouts a starved host cannot overrun. quickRaft's
+// 50 ms lets a leader lose its lease, or a promoted voter campaign, whenever the scheduler pauses the
+// test process for that long (BUG-0937); the cap tests promote real voters, so they need the margin.
+func steadyTimeouts(cfg *RaftConfig) {
+	cfg.HeartbeatTimeout = 500 * time.Millisecond
+	cfg.ElectionTimeout = 500 * time.Millisecond
+	cfg.LeaderLease = 500 * time.Millisecond
+}
+
+// capCluster is a leader, elected before it returns, with every id in joiners registered as a nonvoter.
 func capCluster(t *testing.T, joiners ...string) *Raft {
 	t.Helper()
-	leader := openOrFail(t, quickRaft(t, t.TempDir(), "n1"))
+	leaderConfig := quickRaft(t, t.TempDir(), "n1")
+	steadyTimeouts(&leaderConfig)
+	leader := openOrFail(t, leaderConfig)
+	waitFor(t, leader.IsLeader)
 	for _, id := range joiners {
-		c5Join(t, leader, id)
+		c5JoinTimed(t, leader, id, steadyTimeouts)
 	}
+	waitFor(t, leader.IsLeader)
 	return leader
 }
 

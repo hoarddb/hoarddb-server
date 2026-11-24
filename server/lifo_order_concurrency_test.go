@@ -68,7 +68,7 @@ func scanIDs(t *testing.T, s *Server, request ScanRequest) ([]string, int64) {
 
 // TestLIFOConcurrentPushesReadBackInCommitOrder settles whether a scan of a
 // LIFO bucket can read its entries out of order when many clients push at
-// once, the way bench/social's seed burst does. Pushers race on one bucket
+// once, the way a social-feed seed burst does. Pushers race on one bucket
 // while scanners read pages; afterwards every page, full and skipped, must be
 // the reverse of the order the storage keys record, with nothing missing or
 // repeated, and every page read during the pushes must be a consistent prefix:

@@ -15,6 +15,10 @@ type Options struct {
 	// Fingerprint pins the server's certificate: the ed25519 fingerprint the server prints
 	// when it starts. Set this or Insecure; Dial refuses a connection that does neither.
 	Fingerprint string
+	// Fingerprints are more pins: the server may present any of Fingerprint and these. A tool
+	// that reads every member of a cluster (dump, restore) passes one per member, because each
+	// member has its own certificate.
+	Fingerprints []string
 	// Insecure skips certificate verification. It is for local development against a node
 	// you started yourself: anyone on the path can read and change the traffic, password
 	// included. Use Fingerprint for anything else.

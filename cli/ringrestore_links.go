@@ -188,7 +188,9 @@ func (c *linkCollector) sortedDeclaring() []*dumpBucket {
 // without the privilege to describe it counts as absent, as pass 2 does for a database, and
 // the create that follows reports the real reason.
 func (c *linkCollector) checkTargetOnRing(ctx context.Context, source restoreTargetSource, record *dumpBucket, link restoreLink) error {
-	_, err := source.DescribeBucket(ctx, link.target.db, link.target.name)
+	_, err := retryQuorumCtx(ctx, func() (ringclient.BucketInfo, error) {
+		return source.DescribeBucket(ctx, link.target.db, link.target.name)
+	})
 	if err == nil {
 		return nil
 	}

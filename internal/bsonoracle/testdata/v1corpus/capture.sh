@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# PRIVATE-ONLY: this script needs the benchmark harness (bench/) of the private repository; it is
+# kept in the published tree only because the corpus tests read it (see SOURCE.md).
 # capture.sh - captures the first v1.0-written BSON corpus (bson-codec-spec.md
 # 9.1.6, bson-codec-build.md step 1d) into records.jsonl.gz and stats.json.
 #

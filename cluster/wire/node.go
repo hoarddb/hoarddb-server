@@ -1368,13 +1368,20 @@ func (n *Node) Insert(ctx context.Context, db, bucket string, doc bson.D, option
 		return Inserted{}, err
 	}
 	if answer.Held {
-		return Inserted{}, &cluster.Error{Code: cluster.CodeUnavailable, Message: fmt.Sprintf(
-			"the insert into %s.%s was not ordered here because %s. Nothing was written. Retry it in a few seconds: a retry with the same request id is safe", db, bucket, WriteAnswer{Held: true, HoldCause: answer.HoldCause}.notOrderedBecause())}
+		return Inserted{}, heldInsertRefusal(db, bucket, answer.HoldCause)
 	}
 	if answer.Forward {
 		return Inserted{}, fmt.Errorf("inserting into %s.%s: %w", db, bucket, ErrNoPeers)
 	}
 	return Inserted{ID: answer.ID, Pos: answer.Pos, Deduped: answer.Deduped, Outcome: answer.Outcome, CopiesConfirmed: answer.CopiesConfirmed, ServedBy: cmp.Or(answer.ServedBy, n.cfg.NodeID)}, nil
+}
+
+// heldInsertRefusal is the refusal of an insert whose pair was held: the owner took no position
+// and wrote nothing, so the caller must not be told otherwise. Node.Insert and the ring handler
+// both answer with it.
+func heldInsertRefusal(db, bucket, holdCause string) error {
+	return &cluster.Error{Code: cluster.CodeUnavailable, Message: fmt.Sprintf(
+		"the insert into %s.%s was not ordered here because %s. Nothing was written. Retry it in a few seconds: a retry with the same request id is safe", db, bucket, WriteAnswer{Held: true, HoldCause: holdCause}.notOrderedBecause())}
 }
 
 // send writes one resolved operation and turns a hold or a forward into the error a

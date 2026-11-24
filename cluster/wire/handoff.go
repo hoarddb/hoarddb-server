@@ -142,12 +142,22 @@ type handoffPair struct {
 	// gen counts the epochs fed to the pair, so a slow catch-up or position query that
 	// finishes after a further epoch change is dropped.
 	gen uint64
-	// oldCopies are the members of the copy set at fromEpoch that were not committed down, and
-	// oldDown the ones that were: the copy-set rule (conv section 10 rule 2) covers both, so
-	// neither is asked again as a holder outside the copy set.
+	// oldCopies are the members of the copy set at fromEpoch that were live then and are live
+	// now, and oldDown the ones committed down (or dead) at fromEpoch or now: the copy-set rule
+	// (conv section 10 rule 2) covers both, so neither is asked again as a holder outside the
+	// copy set. A member down at fromEpoch holds nothing that epoch ordered, so its record never
+	// answers for it, this node's own included (BUG-0926).
 	oldCopies   []string
 	oldDown     []string
 	copiesKnown bool
+	// predecessor is the owner at fromEpoch when it is another node: it ordered every write of
+	// that epoch, a degraded one held by it alone included, so while it is live its answer is
+	// required whatever the quorum count says (BUG-0926).
+	predecessor string
+	// everyCopy says this node cannot name the epochs it missed (a restart hold, an epoch gap
+	// in what it was fed, or a hold still open when a further epoch committed): any live old copy may have ordered a write only it holds, so every one
+	// must answer, and this node's own record is evidence but never an answer (BUG-0926).
+	everyCopy bool
 	// target is the highest position the old copy set reported (conv section 10 rule 2).
 	target      cluster.Position
 	targetKnown bool
@@ -622,6 +632,10 @@ func (h *Handoff) feedEpoch(key pairKey, prev handoffPrev, now time.Duration) {
 		hp.barrier.Epoch = prev.epoch
 		h.pairs[key] = hp
 	}
+	// A hold still waiting for its old copies when this epoch commits ordered nothing at prev
+	// (BUG-0926): what it waited for is still owed, and its own record answers for neither epoch.
+	unsettled := hp.barrier.Hold == machine.HoldAwaiting && hp.copiesKnown
+	owedCopies, owedDown := hp.oldCopies, hp.oldDown
 	hp.rf, hp.fromEpoch = rf, prev.epoch
 	hp.restartWindow = h.cfg.Restarted && now-h.bootedAt < h.stopBound()
 	hp.gen++
@@ -629,6 +643,7 @@ func (h *Handoff) feedEpoch(key pairKey, prev handoffPrev, now time.Duration) {
 	hp.target, hp.targetKnown, hp.caughtUp = cluster.Position{}, false, false
 	h.publishTarget(key, publishedTarget{}, false)
 	hp.oldCopies, hp.oldDown, hp.copiesKnown = nil, nil, false
+	hp.predecessor, hp.everyCopy = "", false
 	event := machine.EpochCommitted{
 		At: now, Epoch: h.epoch, SelfID: h.cfg.Self, OldRank1ID: before.ID, Rank1ID: after.ID, Moved: before.ID != after.ID,
 		Appended: appendedAt(h.cfg.Pairs.Snapshot(key.slot, key.db), prev.epoch), Bound: h.stopBound(),
@@ -637,8 +652,42 @@ func (h *Handoff) feedEpoch(key pairKey, prev handoffPrev, now time.Duration) {
 	if hp.barrier.Hold == machine.HoldAwaiting {
 		hp.oldCopies, hp.oldDown = h.splitDown(prev.table.Copies(key.slot, prev.rf[key.db]))
 		hp.copiesKnown = true
+		if before.ID != h.cfg.Self && slices.Contains(hp.oldCopies, before.ID) {
+			hp.predecessor = before.ID
+		}
+		// Epochs move one at a time (the FSM's epoch bump), so a gap means a state this node
+		// never applied (a Raft snapshot install): the owners in between are unknown.
+		hp.everyCopy = h.epoch > prev.epoch+1
+		if unsettled {
+			h.carryOwed(hp, owedCopies, owedDown)
+		}
 	}
 	h.finish(key, hp)
+}
+
+// carryOwed keeps what an awaiting hold still owed when a further epoch reopened it (BUG-0926).
+// The node never ordered the pair at the epoch that just ended, so its record is evidence only and
+// every live copy answers (everyCopy); the copies the earlier hold waited for stay in the rule
+// while they are live, even when the new epoch left them out of the copy set, because a degraded
+// write only one of them holds is in nobody's quorum. A copy committed down since leaves the rule,
+// the way out the hold names. Callers hold h.mu.
+func (h *Handoff) carryOwed(hp *handoffPair, owedCopies, owedDown []string) {
+	hp.everyCopy = true
+	for _, id := range owedCopies {
+		if slices.Contains(hp.oldCopies, id) || slices.Contains(hp.oldDown, id) {
+			continue
+		}
+		if state, present := h.states[id]; present && state != cluster.MemberDown && state != cluster.MemberDead {
+			hp.oldCopies = append(hp.oldCopies, id)
+		} else {
+			hp.oldDown = append(hp.oldDown, id)
+		}
+	}
+	for _, id := range owedDown {
+		if !slices.Contains(hp.oldCopies, id) && !slices.Contains(hp.oldDown, id) {
+			hp.oldDown = append(hp.oldDown, id)
+		}
+	}
 }
 
 // Saw reports whether the handoff has been fed the committed epoch, so what it knows of the
@@ -689,6 +738,9 @@ func (h *Handoff) RestartHold(slot uint16, db uint64, rf int, epoch uint64) (hel
 	hp.target, hp.targetKnown, hp.caughtUp = cluster.Position{}, false, false
 	hp.oldCopies, hp.oldDown = h.splitDown(h.table.Copies(slot, rf))
 	hp.copiesKnown = true
+	// The epoch the node booted into may not be the one it last applied before it stopped: its
+	// own record cannot say what another copy ordered meanwhile, so every live copy answers.
+	hp.everyCopy = true
 	h.apply(key, hp, machine.RestartHold{At: h.bootedAt, Bound: bound, Epoch: epoch})
 	// After apply, so the order is the documented one: h.mu, the pair's lock, targetMu.
 	h.publishTarget(key, publishedTarget{}, false)
@@ -697,13 +749,18 @@ func (h *Handoff) RestartHold(slot uint16, db uint64, rf int, epoch uint64) (hel
 	return held, true
 }
 
-// splitDown parts a copy set by the members' states now: live are the ones not committed
-// down or gone, self included, whose answers a new owner (the copy set at the previous epoch,
-// conv section 10 rule 2) or a restarted owner (the current one) needs; down are the ones
-// committed down or dead, whose loss the copy-set rule already accounts for. Callers hold h.mu.
+// splitDown parts a copy set read from a table: live are the members that were neither down
+// nor dead in the table's own epoch and are neither now, self included, whose answers a new
+// owner (the copy set at the previous epoch, conv section 10 rule 2) or a restarted owner (the
+// current one) needs; down are the rest, whose loss the copy-set rule accounts for. The table's
+// state matters for a member that came back since: down at the previous epoch, it holds
+// nothing that epoch ordered, so it must not answer for it (BUG-0926). Callers hold h.mu.
 func (h *Handoff) splitDown(copies []cluster.Member) (live, down []string) {
 	for _, member := range copies {
-		if state, present := h.states[member.ID]; present && state != cluster.MemberDown && state != cluster.MemberDead {
+		state, present := h.states[member.ID]
+		liveNow := present && state != cluster.MemberDown && state != cluster.MemberDead
+		liveThen := member.State != cluster.MemberDown && member.State != cluster.MemberDead
+		if liveNow && liveThen {
 			live = append(live, member.ID)
 		} else {
 			down = append(down, member.ID)
@@ -906,6 +963,12 @@ func (h *Handoff) advance(ctx context.Context, key pairKey, out *handoffOut) err
 // the target is the highest position that answered and the pair is marked degraded; an
 // unanswered live copy keeps the hold.
 //
+// The quorum covers writes acknowledged at majority; a degraded write is held by the copy that
+// ordered it alone (BUG-0926). So the live predecessor (the owner at fromEpoch) must answer
+// whatever the count, and a barrier that cannot name the epochs it missed (a restart hold, an
+// epoch gap) needs an answer from every live copy, counting its own record as evidence only. A
+// member committed down at fromEpoch is not among the copies: it held nothing that epoch ordered.
+//
 // Every holder outside the copy-set rule (holdersOf: a member that left the copy set and has
 // not retired, BUG-0834) is asked too, and its position, ready or retired, raises the target;
 // it never counts toward the quorum. A live holder that does not answer, or answers with an
@@ -928,6 +991,7 @@ func (h *Handoff) Target(ctx context.Context, slot uint16, db uint64, fromEpoch 
 		return cluster.Position{}, fmt.Errorf("the target of slot %d of database %d was asked for epoch %d and the open barrier moves it from epoch %d", slot, db, fromEpoch, current)
 	}
 	copies, rf, gen := slices.Clone(hp.oldCopies), hp.rf, hp.gen
+	required, everyCopy := requiredAnswers(hp, h.cfg.Self), hp.everyCopy
 	holders := h.holdersOf(slot, db, slices.Concat(hp.oldCopies, hp.oldDown))
 	deadAfter := h.deadAfter
 	h.mu.Unlock()
@@ -935,18 +999,25 @@ func (h *Handoff) Target(ctx context.Context, slot uint16, db uint64, fromEpoch 
 	need := rf - (rf/2 + 1) + 1
 	var best cluster.Position
 	answers, notReady := 0, 0
-	var missing []error
+	var missing, missingRequired []error
 	for _, name := range copies {
 		reply, counts, err := h.positionOf(ctx, name, slot, db)
 		if err != nil {
 			if errors.Is(err, errCopyNotReady) {
 				notReady++
+			} else if slices.Contains(required, name) {
+				missingRequired = append(missingRequired, err)
 			}
 			missing = append(missing, err)
 			continue
 		}
 		if best.Less(reply) {
 			best = reply
+		}
+		if name == h.cfg.Self && slices.Contains(required, name) {
+			// Evidence of what this node holds, never an answer for what it may have missed.
+			notReady++
+			continue
 		}
 		if !counts {
 			// A copy that answered retired has left the copy set at the new epoch (the old owner
@@ -968,8 +1039,20 @@ func (h *Handoff) Target(ctx context.Context, slot uint16, db uint64, fromEpoch 
 	// the lost copies acknowledged with it, so it keeps the hold (a copy that answered
 	// "seeding" holds no acknowledged write and is excluded).
 	degraded := len(copies) < need && answers+notReady == len(copies)
-	if answers < need && !degraded {
+	if !everyCopy && answers < need && !degraded {
 		return cluster.Position{}, shortfallError(slot, db, shortfall{need: need, rf: rf, answers: answers, live: len(copies), fromEpoch: fromEpoch, missing: missing})
+	}
+	if len(missingRequired) > 0 {
+		// A degraded write (fewer copies than the concern) is in no quorum: only the copy that
+		// ordered it may hold it, and while that copy is live its silence is no evidence that it
+		// holds less (BUG-0926).
+		return cluster.Position{}, requiredSilentError(slot, db, fromEpoch, missingRequired)
+	}
+	if everyCopy {
+		// Every live copy answered, so whatever any of them ordered is in best; the count only
+		// says whether fewer copies than the quorum, this node's evidence aside, were left to
+		// answer (a copy committed down since the hold opened, BUG-0926).
+		degraded = answers < need
 	}
 	if len(holders.down) > 0 {
 		err := downHolderError(slot, db, holders.down, deadAfter)
@@ -1201,7 +1284,15 @@ func (h *Handoff) OnHandoffReq(from string, env transport.Envelope, msg HandoffR
 			From: from, To: h.cfg.Self, FromEpoch: msg.FromEpoch, ToEpoch: msg.ToEpoch, Slots: []uint16{slot},
 			Valid: h.validReq(from, key, msg),
 		}
+		wasHeld := hp.barrier.Hold != machine.HoldNone
 		act := h.apply(key, hp, event)
+		if !wasHeld && hp.barrier.Hold == machine.HoldAwaiting {
+			// A hold this request opened ahead of its commit is the barrier that commit opens, not
+			// one still owed from an earlier epoch: copies an earlier barrier of the pair gathered
+			// must not make feedEpoch carry them (BUG-0926).
+			hp.oldCopies, hp.oldDown, hp.copiesKnown = nil, nil, false
+			hp.predecessor, hp.everyCopy = "", false
+		}
 		h.queue(key, hp, act, &out)
 		h.finish(key, hp)
 	}
@@ -1394,6 +1485,32 @@ func (h *Handoff) overdue(key pairKey, hp *handoffPair, req HeldRequest) error {
 		key.slot, key.db, nothing)}
 }
 
+// requiredAnswers names the old copies whose answer a target cannot do without (BUG-0926):
+// every live one, this node included, when the node cannot name the epochs it missed, and the
+// live predecessor otherwise. Callers hold h.mu.
+func requiredAnswers(hp *handoffPair, self string) []string {
+	if hp.everyCopy {
+		return slices.Clone(hp.oldCopies)
+	}
+	if hp.predecessor != "" && hp.predecessor != self {
+		return []string{hp.predecessor}
+	}
+	return nil
+}
+
+// requiredSilentError is the hold on a pair whose required old copy did not answer. It names the
+// way out when that copy is gone for good: the detector commits it down, which takes it out of
+// the rule, or the operator replaces it.
+func requiredSilentError(slot uint16, db uint64, fromEpoch uint64, missing []error) error {
+	return fmt.Errorf("slot %d of database %d waits for a copy that was live at epoch %d and has not answered: it may hold writes acknowledged with fewer copies than their concern that no other copy has, so nothing is ordered on the pair until it answers. Run 'nodes' to see it; %s: %w",
+		slot, db, fromEpoch, holdWayOut, errors.Join(missing...))
+}
+
+// holdWayOut is how a hold on a silent copy ends without that copy (rule 3 of the errors: name
+// the fix). The detector commits an unreachable member down, which takes it out of the copy-set
+// rule; a member that will never return is replaced by the operator.
+const holdWayOut = "a copy that stays unreachable is committed down after the cluster's failover_ms and the pair then opens without what only it held, and one that will never come back is replaced with 'replace-node <node> --with <node>@<addr>'"
+
 // shortfall is what a Target that could not meet its quorum knew.
 type shortfall struct {
 	need, rf, answers, live int
@@ -1403,6 +1520,6 @@ type shortfall struct {
 
 // shortfallError names the copies that did not answer. It never wraps a nil.
 func shortfallError(slot uint16, db uint64, s shortfall) error {
-	return fmt.Errorf("slot %d of database %d needs ready answers from %d of the copies it had at epoch %d (replication factor %d) and has %d, so no write is ordered yet. Run 'nodes' to see which copy is not answering: %w",
-		slot, db, s.need, s.fromEpoch, s.rf, s.answers, errors.Join(s.missing...))
+	return fmt.Errorf("slot %d of database %d needs ready answers from %d of the copies it had at epoch %d (replication factor %d) and has %d, so no write is ordered yet. Run 'nodes' to see which copy is not answering; %s: %w",
+		slot, db, s.need, s.fromEpoch, s.rf, s.answers, holdWayOut, errors.Join(s.missing...))
 }

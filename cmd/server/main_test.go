@@ -161,6 +161,11 @@ func loadStartConfig(t *testing.T) *config.Config {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
+	// Port 0, so a test that starts a server never contends for the default 4433 and 4434
+	// with another process on the host (BUG-0923).
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.TCP.Listen = "127.0.0.1:0"
+	cfg.TCP.InternodeListen = "127.0.0.1:0"
 	return cfg
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -86,7 +87,14 @@ func TestOnlyTheSeamImportsBadger(t *testing.T) {
 	if !seen["github.com/hoarddb/hoarddb-server/storage"] {
 		t.Errorf("github.com/hoarddb/hoarddb-server/storage no longer imports Badger: the seam has moved, and this test's premise with it")
 	}
+	// The density harness lives in the private tree's bench/, which the public tree does not
+	// carry; its entry can only be checked where the directory exists.
+	_, benchErr := os.Stat("../bench")
+	benchPresent := benchErr == nil
 	for exception := range badgerImportExceptions {
+		if strings.HasPrefix(exception, "github.com/hoarddb/hoarddb-server/bench/") && !benchPresent {
+			continue
+		}
 		if !seen[exception] {
 			t.Errorf("%s is listed in badgerImportExceptions but no longer imports Badger: remove it from the list", exception)
 		}

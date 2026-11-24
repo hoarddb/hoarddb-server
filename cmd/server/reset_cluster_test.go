@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,6 +93,27 @@ func TestResetPasswordOnAClusterMemberRefusesBeforePromptingAndWritesNothing(t *
 // first so it has its own ring/raft, still resets offline, and the new password logs in. Break:
 // decide by the presence of ring/raft; red.
 func TestResetPasswordOnAZeroConfigNodeStillWorks(t *testing.T) {
+	requireZeroConfigReset(t)
+}
+
+// TestResetPasswordOnAZeroConfigNodeStillWorksWithTheDefaultPortsTaken: another process on the
+// host holds 4433 and 4434, the defaults a zero-config server would bind. The test's server must
+// take its own ports, so the flow still passes (BUG-0923).
+func TestResetPasswordOnAZeroConfigNodeStillWorksWithTheDefaultPortsTaken(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:4433", "127.0.0.1:4434"} {
+		holder, err := net.Listen("tcp", address)
+		if err != nil {
+			t.Skipf("cannot hold %s for this test: %v", address, err)
+		}
+		t.Cleanup(func() { _ = holder.Close() })
+	}
+	requireZeroConfigReset(t)
+}
+
+// requireZeroConfigReset starts a zero-config node once, resets its root password offline and
+// checks the new password authenticates.
+func requireZeroConfigReset(t *testing.T) {
+	t.Helper()
 	cfg := loadStartConfigWithRoot(t)
 	cfg.Server.RootUser = "admin"
 	cfg.Metrics.Enabled = false

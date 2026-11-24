@@ -130,26 +130,26 @@ If one of those is on your hot path, this is not the layout for it, and the
 ## Try it
 
 Start a server and seed the layout as described on the [How-to](howto.md) page,
-with `-layout agent`. The transcript below was captured against that data: forty
-users, sixty sessions of fifteen turns, sixty runs with six scratch keys and ten
-tasks each, thirty memories per user.
+with `hoarddb seed agent`. The transcript below was captured against that data: forty
+users, sixty sessions of forty turns, sixty runs with six scratch keys and ten
+tasks each, two hundred memories per user.
 
 ```
 [h]oardDB [agents]> use scenarios_agent
 Switched to database 'scenarios_agent'
 [h]oardDB [scenarios_agent]> db.Session.list({limit: 2})
-{"Messages": "fifoStore (15 elements)", "Owner": "u7", "_id_": "s15"}
-{"Messages": "fifoStore (15 elements)", "Owner": "u8", "_id_": "s23"}
-more: db.Session.list({limit: 2, cursor: "010000000000000004ef0c8b9b415e9d5a01b906507332330000e6bc3f28"})
+{"Messages": "fifoStore (40 elements)", "Owner": "u7", "_id_": "s15"}
+{"Messages": "fifoStore (40 elements)", "Owner": "u8", "_id_": "s23"}
+more: db.Session.list({limit: 2, cursor: "0100000000000000016919e017f7c24abc01b906507332330000045e47dd"})
 [h]oardDB [scenarios_agent]> db.Session["s15"].Messages.count()
-15
+40
 [h]oardDB [scenarios_agent]> db.Session["s15"].Messages.peek(2)
 {"at": 1700015000, "role": "user", "text": "shjkrcuf lfoajtg erofxlvx qevvmh gclvusafg duf jn mkpvynxx yxoabsvn aei qtrnwezxs ejjclk zud gmuobdyx pendnkx ggku auqiuxl zetgu ctbt hi"}
 {"at": 1700015010, "role": "assistant", "text": "fzgqa ki fanmm ovtjiku ftmpq ihmxqlj mjx ozxwypwwb dvjaubz yqf khzfiyqiz ozqtu grsu sp lu tbxwivr xmioujoi xptrylfif wqed mgukrvrpy dtwqvamd uypoghk kxhd akpbcx"}
 [h]oardDB [scenarios_agent]> db.Session["s15"].Messages.push({role: "user", text: "and in metric units please", at: 1700015200})
-OK  pushed: Messages now holds 16 elements
+OK  pushed: Messages now holds 41 elements
 [h]oardDB [scenarios_agent]> db.Session.list({filter: {Owner: "u7"}, limit: 3})
-{"Messages": "fifoStore (15 elements)", "Owner": "u7", "_id_": "s15"}
+{"Messages": "fifoStore (41 elements)", "Owner": "u7", "_id_": "s15"}
 ```
 
 A list of documents shows each store field as its type and element count, not
@@ -173,13 +173,13 @@ OK  put "k2": Scratch now holds 6 elements
 [h]oardDB [scenarios_agent]> db.Run["run17"].Tasks.count()
 10
 [h]oardDB [scenarios_agent]> db.Run["run17"].Tasks.claim(2)
-lease 000001a1b0341fa71ae51660e3e86b70
+lease 000001a207f708deae90258337c216c1
 {"payload": "mwxpbdy tawr jcd xafeli kcxsnvq mk lykuttwrh oykzctwgw", "task": "t0"}
 {"payload": "tawr clqt cjhijr dby jgcia ckzaqjx ovqjfwad aujy", "task": "t1"}
 [h]oardDB [scenarios_agent]> db.Run["run17"].Tasks.count()
 8
-[h]oardDB [scenarios_agent]> db.Run["run17"].Tasks.ack("000001a1b0341fa71ae51660e3e86b70")
-OK  acked lease 000001a1b0341fa71ae51660e3e86b70
+[h]oardDB [scenarios_agent]> db.Run["run17"].Tasks.ack("000001a207f708deae90258337c216c1")
+OK  acked lease 000001a207f708deae90258337c216c1
 [h]oardDB [scenarios_agent]> db.Run["run17"].Tasks.count()
 8
 ```
@@ -194,9 +194,9 @@ base64 of the 256-byte vector is shortened here; the server returns all of it.
 
 ```
 [h]oardDB [scenarios_agent]> db.User["u7"].Memories.count()
-30
+200
 [h]oardDB [scenarios_agent]> db.User["u7"].Memories.get("m003")
-{"text": "lwmtxr pzlqy pllizvrm pyvrgaazv aesewkzfm cihvcirrj qmepj mwxpbdy xcqesnum zmy buliumy rtyf", "vec": {"$binary":{"base64":"qnknP6r8Jj/cRQO/5Bj5PuCRcL1Eu+W+KKz1PpJFXz9MHaq+nAU8P1Riqb4spKW+…","subType":"00"}}}
+{"text": "cwqvfwzch brs aoxvjz tqqatu riduupnxq vratqzrm xxrbm usvmpg xv fm riduupnxq sxej", "vec": {"$binary":{"base64":"cOZOviBzZT6Yf2M+hJtPPyS3d7+qqSU/TBR1vyh+NL/o7hu+oFNyP3gCAb78ZI2+jNgzv8SMdz+YE0C/MBT8vWDnBj5aXls/KBcPv/w0cL+oj2y/fidZP8SYfz9gUzU/0J7yPZD8Qz/432W/EG1CvrCvOj/otmq/DCBSv9gvAT+Uufa+9OOkPvTLZ78Yz7S+SC5QPzBVTj5awz+/XMdYP2DXRL4M28A+yHBoPu4cAT9CC0e/8CE2v2T3kr7IkvS+0JhvPjiyVj5QtmM+VDKhPuBZFz6ozIe+MNuyPVj3Pz8gl/U9ALoHPLAYm73kOnm/wFPnPWBhvz0Mc90+uPknPw==","subType":"00"}}}
 [h]oardDB [scenarios_agent]> db.User["u7"].Memories.get("m-u7-03")
 CLI error: NOT_FOUND: Memories of "u7" in scenarios_agent.User has no key "m-u7-03". Run 'db.User["u7"].Memories.list()' to see what it holds, or 'db.User["u7"].Memories.put("m-u7-03", {…})' to add one
 ```

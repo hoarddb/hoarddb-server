@@ -16,8 +16,10 @@ import (
 // operations with the write methods of a [Bucket] made by [Bucket.In], then call [Batch.Send].
 //
 // A batch is not a transaction, and it follows MongoDB's unordered bulkWrite: each operation
-// is applied or refused on its own, a refused one does not stop the others, and operations on
-// one document apply in the order they were queued. Send returns an answer for every
+// is applied or refused on its own, and operations on one document apply in the order they were
+// queued. One exception: when a store operation is refused, or its outcome is unknown, the later
+// store operations on the same store of the same document are answered refused (UNAVAILABLE) and
+// nothing is applied for them; document writes and every other store are not held. Send returns an answer for every
 // operation, in the order queued. To retry after a lost answer, call Send again on the same
 // Batch: it reuses the request id, the operations that were applied answer Deduped, and the
 // rest run. Retrying a part of a batch is not offered, because the position of an operation

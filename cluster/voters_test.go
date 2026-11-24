@@ -11,8 +11,17 @@ import (
 
 func c5Join(t *testing.T, leader *Raft, id string) *Raft {
 	t.Helper()
+	return c5JoinTimed(t, leader, id, nil)
+}
+
+// c5JoinTimed is c5Join with the opened node's config adjusted first (nil leaves quickRaft's).
+func c5JoinTimed(t *testing.T, leader *Raft, id string, tune func(*RaftConfig)) *Raft {
+	t.Helper()
 	cfg := quickRaft(t, t.TempDir(), id)
 	cfg.Bootstrap = false
+	if tune != nil {
+		tune(&cfg)
+	}
 	joined := openOrFail(t, cfg)
 	if _, err := leader.Join(JoinRequest{Member: Member{ID: id, Incarnation: 1, DataAddr: cfg.Listener.Addr().String()},
 		RaftAddr: cfg.Listener.Addr().String(), PlacingSet: make([]byte, 1024)}); err != nil {

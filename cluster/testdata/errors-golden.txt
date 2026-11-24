@@ -29,7 +29,7 @@ slot 17 of app is owned by n1 at epoch 3 and this request carried epoch 2, so th
 create bucket app.users: n1 owns 5 of the 8192 slots this call must read and did not answer, so a partial result would look complete. Nothing was returned. Run 'nodes' to see n1; retry in a few seconds, or start its replacement with 'replace-node n1 --with n1@192.0.2.1:7000'
 
 == NO_QUORUM 0x16 exit=8
-this node cannot see a majority of the cluster's 3 voters (5 answered), so it refuses reads and writes: what it holds may be missing acknowledged writes. Run 'nodes' to see which voters are down, and retry when a majority answers
+this node cannot see a majority of the cluster's 3 voters, so it refuses reads and writes: what it holds may be missing acknowledged writes. Run 'nodes' to see which voters are down, and retry when a majority answers
 
 == RF_UNSUPPORTED 0x17 exit=2
 replication factor 3 needs at least 3 voters, at least 3 of them holding data; this cluster has 3 voters and 2 data members. Run 'nodes' to see the members, add a data node with 'join n2@192.0.2.1:7000', or set 'alter database app { replication_factor: 5 }'
@@ -71,7 +71,7 @@ app.users is not writable: its declaration is at schema version 2 and the databa
 app.users changed after this client read it: the client holds declaration version 2 and the table in force is version V_s, so a field may have been added or retired and this write might use the wrong ones. Nothing was written. Read the bucket again and send the write once more, which the hoardDB drivers do by themselves: 'describe bucket users in app' shows the fields in force
 
 == BUCKET_DROPPING 0x21 exit=8
-bucket "users" in database "app" is being dropped (5 of 8192 slots swept), and a dropping bucket accepts no reads or writes. Run 'show buckets in app' to watch it leave the list; the name is free when the sweep finishes and the declaration is deleted
+bucket "users" in database "app" is being dropped, and a dropping bucket accepts no reads or writes. Run 'show buckets in app' to watch it leave the list; the name is free when the sweep finishes and the declaration is deleted
 
 == DECL_UNAVAILABLE 0x22 exit=8
 cannot read the declaration of bucket "users" in database "app": the node that stores it did not answer in time (it may be busy, or down), and this node holds no cached declaration for that name. Nothing was written. Run 'nodes': if every member is active, run 'status' on each node: Serving: ok means the read was only slow, so send the write again; a member that is not active is the one to bring back

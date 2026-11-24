@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/hoarddb/hoarddb-server/cluster"
@@ -18,6 +20,18 @@ const ringDumpPageTries = 5
 // It is a variable only so a test can shorten it; a shipped run waits one second.
 var ringDumpPageRetryWait = time.Second
 
+// A page answered NO_QUORUM or LEASE_LAPSED is asked for again after a random wait below
+// ringDumpQuorumBackoffBase that doubles to ringDumpQuorumBackoffMax, the rule the Go driver
+// applies to the same refusals, for at most ringDumpQuorumBound from the first refusal. The
+// driver's own bound is its caller's deadline; a dump has no per-page deadline, so the bound
+// is a figure: a member that has not seen a majority for a minute is not a stall.
+// They are variables only so a test can shorten them.
+var (
+	ringDumpQuorumBackoffBase = 100 * time.Millisecond
+	ringDumpQuorumBackoffMax  = 5 * time.Second
+	ringDumpQuorumBound       = time.Minute
+)
+
 // retryMovedPage runs one data-page call and retries it while the ring refuses it because
 // a slot moved or its owner is down. what names the page in the failure text; call closes
 // over the request, so every attempt asks for the same cursor.
@@ -27,6 +41,12 @@ var ringDumpPageRetryWait = time.Second
 // other error is returned at once and untouched - a permission refusal, a lost document or
 // a broken connection is not a membership change, and asking again would only repeat it.
 func (r *ringDumpRun) retryMovedPage(what string, call func() error) error {
+	call = func(inner func() error) func() error {
+		return func() error {
+			_, err := retryQuorum(r, func() (struct{}, error) { return struct{}{}, inner() })
+			return err
+		}
+	}(call)
 	for attempt := 1; ; attempt++ {
 		err := call()
 		if err == nil {
@@ -53,6 +73,68 @@ func (r *ringDumpRun) retryMovedPage(what string, call func() error) error {
 		if err := r.waitForPageRetry(); err != nil {
 			return err
 		}
+	}
+}
+
+// retryQuorum runs one ring call of a dump and asks again while the member answers NO_QUORUM
+// or LEASE_LAPSED, for at most ringDumpQuorumBound from the first refusal. Every call a dump
+// makes goes through it, so a stall in the listing of buckets is waited out like one in a
+// page. The refusal is returned unchanged after the bound, so its own text reaches the user.
+func retryQuorum[answer any](r *ringDumpRun, call func() (answer, error)) (answer, error) {
+	return retryQuorumCtx(r.ctx, call)
+}
+
+// retryQuorumCtx is retryQuorum for a caller that holds only a context: a restore's calls.
+// Asking again is safe for every call it wraps, though not always because nothing was applied.
+// A read changes nothing. A create database that a repeat finds made is answered CONFLICT, and
+// createDatabase reads the row back to tell its own earlier create from another database. A
+// create bucket is two writes, the reverse-index insert and then the declaration, so the refusal
+// can come after the first has applied; the create is idempotent (CreateBucket.Run), and the
+// repeat completes what was left and returns the same id.
+func retryQuorumCtx[answer any](ctx context.Context, call func() (answer, error)) (answer, error) {
+	var refusals int
+	var first time.Time
+	for {
+		got, err := call()
+		if err == nil || !ringDumpQuorumRefusal(err) {
+			return got, err
+		}
+		if refusals == 0 {
+			first = time.Now()
+		}
+		refusals++
+		if time.Since(first) >= ringDumpQuorumBound {
+			return got, err
+		}
+		if waitErr := waitForQuorumRetry(ctx, refusals); waitErr != nil {
+			return got, waitErr
+		}
+	}
+}
+
+// ringDumpQuorumRefusal reports whether a page read was refused because the member could not
+// see a voter majority or renew its lease: it answers that for a stall of a moment (a pause,
+// a busy disk, a node that has just joined) and serves again. The refusal is returned
+// unchanged when the bound passes, so its own text, which names the fix, reaches the user.
+func ringDumpQuorumRefusal(err error) bool {
+	var refusal *ringclient.Error
+	return errors.As(err, &refusal) && (refusal.Code == cluster.CodeNoQuorum || refusal.Code == cluster.CodeLeaseLapsed)
+}
+
+// waitForQuorumRetry waits a random time below the base doubled once per earlier refusal,
+// up to the maximum (full jitter, as the Go driver does), or until ctx is cancelled.
+func waitForQuorumRetry(ctx context.Context, refusals int) error {
+	limit := ringDumpQuorumBackoffBase
+	for step := 1; step < refusals && limit < ringDumpQuorumBackoffMax; step++ {
+		limit *= 2
+	}
+	timer := time.NewTimer(rand.N(min(limit, ringDumpQuorumBackoffMax)))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting to retry a call the ring refused: %w", ctx.Err())
 	}
 }
 

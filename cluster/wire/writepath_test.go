@@ -187,7 +187,12 @@ type fakeLease struct {
 	afterFirst atomic.Pointer[machine.LeaseDecision]
 	// marked is the highest epoch the owner or read path told the lease about (BehindMarker).
 	marked atomic.Uint64
+	// quorumLost makes the fake a QuorumReporter that reports no voter majority.
+	quorumLost atomic.Bool
 }
+
+// QuorumLost implements QuorumReporter.
+func (f *fakeLease) QuorumLost() bool { return f.quorumLost.Load() }
 
 // MarkBehind implements BehindMarker.
 func (f *fakeLease) MarkBehind(epoch uint64, _ bool) { f.marked.Store(epoch) }

@@ -119,8 +119,8 @@ If one of those is on your hot path, this is not the layout for it, and the
 ## Try it
 
 Start a server and seed the layout as described on the [How-to](howto.md) page,
-with `-layout chat`. The transcripts below were captured against that data:
-twenty rooms of twenty messages each, with the users and their memberships
+with `hoarddb seed chat`. The transcripts below were captured against that data:
+145 rooms of one hundred messages each, with forty users and their memberships
 seeded on every side. The seeded text is random words, so the shape is real and
 the prose is not.
 
@@ -130,26 +130,43 @@ A room: its members, a page of its messages, and the user's rooms.
 [h]oardDB [scenarios_chat]> use scenarios_chat
 Switched to database 'scenarios_chat'
 [h]oardDB [scenarios_chat]> db.Room["r11"].get()
-{"Members": "hashStore (8 elements)", "Messages": "fifoStore (20 elements)", "Name": "stpap qjskb", "_id_": "r11"}
+{"Members": "hashStore (8 elements)", "Messages": "fifoStore (100 elements)", "Name": "stpap qjskb", "_id_": "r11"}
 [h]oardDB [scenarios_chat]> db.Room["r11"].Members.list()
-u10  {"since": 1700066600, "user": "u10"}
-u15  {"since": 1700066900, "user": "u15"}
-u21  {"since": 1700067260, "user": "u21"}
-u22  {"since": 1700067320, "user": "u22"}
-u3  {"since": 1700066180, "user": "u3"}
-u36  {"since": 1700068160, "user": "u36"}
+u0  {"since": 1700066000, "user": "u0"}
+u13  {"since": 1700066780, "user": "u13"}
+u14  {"since": 1700066840, "user": "u14"}
+u19  {"since": 1700067140, "user": "u19"}
+u20  {"since": 1700067200, "user": "u20"}
+u30  {"since": 1700067800, "user": "u30"}
+u35  {"since": 1700068100, "user": "u35"}
 u5  {"since": 1700066300, "user": "u5"}
-u7  {"since": 1700066420, "user": "u7"}
 [h]oardDB [scenarios_chat]> db.Room["r11"].Messages.count()
-20
+100
 [h]oardDB [scenarios_chat]> db.Room["r11"].Messages.list({limit: 2})
-{"at": 1700330000, "author": "u3", "text": "hrih en vtmstwv ivcbdb qkby ai jrkc aqas niu nmibtwds"}
-{"at": 1700330030, "author": "u3", "text": "ykponkdjv pio aodsppk kmvkddjl aswu ubp"}
+{"at": 1700330000, "author": "u20", "text": "hrih en vtmstwv ivcbdb qkby ai jrkc aqas niu nmibtwds"}
+{"at": 1700330030, "author": "u20", "text": "ykponkdjv pio aodsppk kmvkddjl aswu ubp"}
 more: db.Room["r11"].Messages.list({limit: 2, cursor: "0000000000000001"})
 [h]oardDB [scenarios_chat]> db.User["u36"].Rooms.list()
-r11  {"room": "r11", "since": 1700068160}
-r2  {"room": "r2", "since": 1700014160}
-r9  {"room": "r9", "since": 1700056160}
+r1  {"room": "r1", "since": 1700008160}
+r102  {"room": "r102", "since": 1700614160}
+r109  {"room": "r109", "since": 1700656160}
+r116  {"room": "r116", "since": 1700698160}
+r125  {"room": "r125", "since": 1700752160}
+r133  {"room": "r133", "since": 1700800160}
+r139  {"room": "r139", "since": 1700836160}
+r14  {"room": "r14", "since": 1700086160}
+r22  {"room": "r22", "since": 1700134160}
+r29  {"room": "r29", "since": 1700176160}
+r36  {"room": "r36", "since": 1700218160}
+r43  {"room": "r43", "since": 1700260160}
+r50  {"room": "r50", "since": 1700302160}
+r57  {"room": "r57", "since": 1700344160}
+r64  {"room": "r64", "since": 1700386160}
+r7  {"room": "r7", "since": 1700044160}
+r71  {"room": "r71", "since": 1700428160}
+r79  {"room": "r79", "since": 1700476160}
+r87  {"room": "r87", "since": 1700524160}
+r94  {"room": "r94", "since": 1700566160}
 ```
 
 The page lists a FIFO from the front, so it reads the oldest messages first; the
@@ -158,9 +175,9 @@ one keyed `get` per id from the room's member list.
 
 ```
 [h]oardDB [scenarios_chat]> db.User["u10"].get()
-{"Name": "agzerar euqkhec", "Rooms": "hashStore (4 elements)", "_id_": "u10"}
+{"Name": "agzerar euqkhec", "Rooms": "hashStore (20 elements)", "_id_": "u10"}
 [h]oardDB [scenarios_chat]> db.User["u15"].get()
-{"Name": "pzalfxg xcp", "Rooms": "hashStore (3 elements)", "_id_": "u15"}
+{"Name": "pzalfxg xcp", "Rooms": "hashStore (20 elements)", "_id_": "u15"}
 ```
 
 A join is three writes. User `u2` joins room `r7`, and the application writes the
@@ -170,12 +187,31 @@ room's side, the user's side and the relationship, then reads both sides back.
 [h]oardDB [scenarios_chat]> db.Room["r7"].Members.put("u2", {user: "u2", since: 1700400100})
 OK  put "u2": Members now holds 8 elements
 [h]oardDB [scenarios_chat]> db.User["u2"].Rooms.put("r7", {room: "r7", since: 1700400100})
-OK  put "r7": Rooms now holds 2 elements
+OK  put "r7": Rooms now holds 21 elements
 [h]oardDB [scenarios_chat]> db.Member.insert({_id_: "r7/u2", Room: "r7", User: "u2", Since: 1700400100})
 OK  id=r7/u2
 [h]oardDB [scenarios_chat]> db.User["u2"].Rooms.list()
-r0  {"room": "r0", "since": 1700000120}
+r100  {"room": "r100", "since": 1700600120}
+r107  {"room": "r107", "since": 1700642120}
+r114  {"room": "r114", "since": 1700684120}
+r123  {"room": "r123", "since": 1700738120}
+r13  {"room": "r13", "since": 1700078120}
+r130  {"room": "r130", "since": 1700780120}
+r138  {"room": "r138", "since": 1700828120}
+r144  {"room": "r144", "since": 1700864120}
+r20  {"room": "r20", "since": 1700120120}
+r28  {"room": "r28", "since": 1700168120}
+r34  {"room": "r34", "since": 1700204120}
+r41  {"room": "r41", "since": 1700246120}
+r49  {"room": "r49", "since": 1700294120}
+r55  {"room": "r55", "since": 1700330120}
+r6  {"room": "r6", "since": 1700036120}
+r63  {"room": "r63", "since": 1700378120}
 r7  {"room": "r7", "since": 1700400100}
+r70  {"room": "r70", "since": 1700420120}
+r76  {"room": "r76", "since": 1700456120}
+r85  {"room": "r85", "since": 1700510120}
+r92  {"room": "r92", "since": 1700552120}
 ```
 
 The `Member` document's id is the room and user joined, so a retried insert is
@@ -194,18 +230,21 @@ user is in, by filter on the relationship bucket.
 
 ```
 [h]oardDB [scenarios_chat]> db.Member.list({filter: {Room: "r7"}, limit: 10})
-{"Room": "r7", "Since": 1700042000, "User": "u0", "_id_": "r7/u0"}
 {"Room": "r7", "Since": 1700043080, "User": "u18", "_id_": "r7/u18"}
-{"Room": "r7", "Since": 1700043020, "User": "u17", "_id_": "r7/u17"}
-{"Room": "r7", "Since": 1700043860, "User": "u31", "_id_": "r7/u31"}
-{"Room": "r7", "Since": 1700042840, "User": "u14", "_id_": "r7/u14"}
-{"Room": "r7", "Since": 1700042780, "User": "u13", "_id_": "r7/u13"}
+{"Room": "r7", "Since": 1700044160, "User": "u36", "_id_": "r7/u36"}
+{"Room": "r7", "Since": 1700042420, "User": "u7", "_id_": "r7/u7"}
+{"Room": "r7", "Since": 1700042360, "User": "u6", "_id_": "r7/u6"}
+{"Room": "r7", "Since": 1700043440, "User": "u24", "_id_": "r7/u24"}
+{"Room": "r7", "Since": 1700042480, "User": "u8", "_id_": "r7/u8"}
 {"Room": "r7", "Since": 1700043380, "User": "u23", "_id_": "r7/u23"}
 {"Room": "r7", "Since": 1700400100, "User": "u2", "_id_": "r7/u2"}
 [h]oardDB [scenarios_chat]> db.Member.list({filter: {User: "u36"}, limit: 5})
-{"Room": "r11", "Since": 1700068160, "User": "u36", "_id_": "r11/u36"}
-{"Room": "r9", "Since": 1700056160, "User": "u36", "_id_": "r9/u36"}
-{"Room": "r2", "Since": 1700014160, "User": "u36", "_id_": "r2/u36"}
+{"Room": "r79", "Since": 1700476160, "User": "u36", "_id_": "r79/u36"}
+{"Room": "r116", "Since": 1700698160, "User": "u36", "_id_": "r116/u36"}
+{"Room": "r139", "Since": 1700836160, "User": "u36", "_id_": "r139/u36"}
+{"Room": "r36", "Since": 1700218160, "User": "u36", "_id_": "r36/u36"}
+{"Room": "r43", "Since": 1700260160, "User": "u36", "_id_": "r43/u36"}
+more: db.Member.list({filter: {User: "u36"}, limit: 5, cursor: "010000000000000001f71c16461de345c504ca0a507234332f753336000013be80e2"})
 ```
 
 The filter runs on the nodes that hold the bucket's slots and reads every document
@@ -216,5 +255,5 @@ Last, a message from `u1`, who had just joined room `r5` with the same three wri
 
 ```
 [h]oardDB [scenarios_chat]> db.Room["r5"].Messages.push({author: "u1", text: "hello, I just joined", at: 1700400010})
-OK  pushed: Messages now holds 21 elements
+OK  pushed: Messages now holds 101 elements
 ```

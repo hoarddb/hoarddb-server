@@ -72,6 +72,15 @@ type failFirst struct {
 	err   error
 }
 
+// failureOf is the error a listing or describe call of key answers with: its standing failure,
+// else the next of its scripted first refusals. The caller holds the stub's mutex.
+func (s *dumpStub) failureOf(key string) error {
+	if err := s.failures[key]; err != nil {
+		return err
+	}
+	return s.firstFailure(key)
+}
+
 // firstFailure is the error one call of key must answer with, and it consumes one of the
 // key's scripted refusals. The caller holds the stub's mutex.
 func (s *dumpStub) firstFailure(key string) error {
@@ -139,7 +148,7 @@ func (s *dumpStub) ShowDatabases(ctx context.Context, page ringclient.PageReques
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls.ShowDatabases++
-	if err := s.failures["ShowDatabases"]; err != nil {
+	if err := s.failureOf("ShowDatabases"); err != nil {
 		return ringclient.DatabasePage{}, err
 	}
 	if len(s.databasePages) == 0 {
@@ -161,7 +170,7 @@ func (s *dumpStub) DescribeDatabase(ctx context.Context, name string, _ ringclie
 	defer s.mu.Unlock()
 	s.calls.DescribeDatabase++
 	s.calls.describedDatabases = append(s.calls.describedDatabases, name)
-	if err := s.failures["DescribeDatabase "+name]; err != nil {
+	if err := s.failureOf("DescribeDatabase " + name); err != nil {
 		return ringclient.DatabaseDescription{}, err
 	}
 	description, scripted := s.descriptions[name]
@@ -181,7 +190,7 @@ func (s *dumpStub) ShowBuckets(ctx context.Context, database string, page ringcl
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls.ShowBuckets++
-	if err := s.failures["ShowBuckets "+database]; err != nil {
+	if err := s.failureOf("ShowBuckets " + database); err != nil {
 		return ringclient.BucketPage{}, err
 	}
 	pages := s.bucketPages[database]
@@ -206,7 +215,7 @@ func (s *dumpStub) DescribeBucket(ctx context.Context, database, bucket string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls.DescribeBucket++
-	if err := s.failures["DescribeBucket "+database+"/"+bucket]; err != nil {
+	if err := s.failureOf("DescribeBucket " + database + "/" + bucket); err != nil {
 		return ringclient.BucketInfo{}, err
 	}
 	declaration, scripted := s.declarations[database+"/"+bucket]

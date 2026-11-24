@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,29 +21,29 @@ import (
 // port 0 and closing, because the service does not report the port it bound.
 func newRingTestHost(t *testing.T) (addr string, client *ringclient.Client) {
 	t.Helper()
+	return newRingTestHostOn(t, reserveLoopbackPort)
+}
+
+// reserveLoopbackPort returns a loopback address that was free a moment ago.
+func reserveLoopbackPort() (string, error) {
 	reserved, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		return "", err
 	}
-	addr = reserved.Addr().String()
+	addr := reserved.Addr().String()
 	if err := reserved.Close(); err != nil {
-		t.Fatal(err)
+		return "", err
 	}
-	cfg := config.DefaultConfig()
-	cfg.Storage.DataDir = t.TempDir()
-	cfg.Server.Listen = "127.0.0.1:0"
-	cfg.TCP.Listen = addr
-	service, err := server.NewService(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := service.SeedRootUser("root", "live-test-password"); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.Start(); err != nil {
-		t.Fatal(err)
-	}
+	return addr, nil
+}
+
+// newRingTestHostOn is newRingTestHost with the port reservation passed in, so a test can make
+// the reserved port be taken before the service binds it.
+func newRingTestHostOn(t *testing.T, reserve func() (string, error)) (addr string, client *ringclient.Client) {
+	t.Helper()
+	addr, service := startRingTestService(t, reserve)
 	t.Cleanup(func() { _ = service.Stop() })
+	var err error
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	client, err = ringclient.Dial(ctx, ringclient.Options{Addr: addr, User: "root", Password: "live-test-password", Insecure: true})
@@ -50,6 +52,41 @@ func newRingTestHost(t *testing.T) (addr string, client *ringclient.Client) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 	return addr, client
+}
+
+// ringTestHostAttempts is how many ports newRingTestHostOn tries before it gives up.
+const ringTestHostAttempts = 5
+
+// startRingTestService reserves a port and starts the service on it. Another process can take
+// the port between the reservation and the bind, so an address-in-use failure starts the whole
+// attempt again with a fresh port and data directory.
+func startRingTestService(t *testing.T, reserve func() (string, error)) (string, *server.Service) {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		addr, err := reserve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.DefaultConfig()
+		cfg.Storage.DataDir = t.TempDir()
+		cfg.Server.Listen = "127.0.0.1:0"
+		cfg.TCP.Listen = addr
+		service, err := server.NewService(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.SeedRootUser("root", "live-test-password"); err != nil {
+			t.Fatal(err)
+		}
+		err = service.Start()
+		if err == nil {
+			return addr, service
+		}
+		_ = service.Stop() // releases the data directory the failed start opened
+		if !errors.Is(err, syscall.EADDRINUSE) || attempt == ringTestHostAttempts {
+			t.Fatalf("starting the ring test host (attempt %d of %d): %v", attempt, ringTestHostAttempts, err)
+		}
+	}
 }
 
 // droppingRelay is a transparent TCP relay in front of the ring server that can lose one
@@ -68,6 +105,10 @@ type droppingRelay struct {
 	// been passed upstream, so a byte the server sends unasked (a post-handshake TLS record)
 	// is copied on instead of being mistaken for the reply.
 	armed, forwarded bool
+
+	// afterUpstreamWrite, when set, runs in forward right after the upstream write, so a test
+	// can hold that goroutine there and decide what the server's reply does meanwhile.
+	afterUpstreamWrite func()
 }
 
 // newDroppingRelay listens on a loopback port and forwards every connection to upstream.
@@ -139,14 +180,20 @@ func (r *droppingRelay) forward(upstream, client net.Conn) {
 	for {
 		n, err := client.Read(buf)
 		if n > 0 {
-			if _, writeErr := upstream.Write(buf[:n]); writeErr != nil {
-				return
-			}
+			// Noted before the write: the server can answer before Write returns here, and
+			// a reply that finds the flag unset is copied to the client instead of dropped.
+			// If the write fails the connection is ending anyway.
 			r.state.Lock()
 			if r.armed {
 				r.forwarded = true
 			}
 			r.state.Unlock()
+			if _, writeErr := upstream.Write(buf[:n]); writeErr != nil {
+				return
+			}
+			if r.afterUpstreamWrite != nil {
+				r.afterUpstreamWrite()
+			}
 		}
 		if err != nil {
 			return
@@ -270,5 +317,84 @@ func TestDroppingRelayClosesAfterForwardingTheRequest(t *testing.T) {
 	case <-relay.Dropped():
 	case <-time.After(10 * time.Second):
 		t.Fatal("the relay never dropped a reply")
+	}
+}
+
+// TestDroppingRelayDropsAReplyThatBeatsTheForwardedFlag: the server's reply is already in the
+// relay when the forward goroutine is still between the upstream write and its bookkeeping.
+// The reply answers the armed request, so it must be dropped, not copied to the client.
+func TestDroppingRelayDropsAReplyThatBeatsTheForwardedFlag(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upstream.Close() })
+	go func() {
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 64)
+		if _, readErr := conn.Read(buf); readErr != nil {
+			return
+		}
+		_, _ = conn.Write([]byte("reply"))
+	}()
+
+	relay := newDroppingRelay(t, upstream.Addr().String())
+	// The forward goroutine waits here until the client has seen what the relay did with the
+	// reply, which orders the reply ahead of the flag without a sleep.
+	clientSawOutcome := make(chan struct{})
+	relay.afterUpstreamWrite = func() { <-clientSawOutcome }
+	client, err := net.Dial("tcp", relay.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	relay.DropNextReply()
+	if _, err := client.Write([]byte("request")); err != nil {
+		t.Fatalf("write the request: %v", err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64)
+	n, readErr := client.Read(buf)
+	close(clientSawOutcome)
+	if readErr == nil {
+		t.Fatalf("the relay forwarded %q, want the connection closed before the reply", buf[:n])
+	}
+	select {
+	case <-relay.Dropped():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the relay never dropped the reply")
+	}
+}
+
+// TestRingTestHostRetriesWhenItsReservedPortIsTaken (BUG-0917): another process takes the port
+// between the reservation and the service's bind. The helper starts the host on a fresh port.
+func TestRingTestHostRetriesWhenItsReservedPortIsTaken(t *testing.T) {
+	thief, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = thief.Close() })
+	reservations := 0
+	reserve := func() (string, error) {
+		reservations++
+		if reservations == 1 {
+			return thief.Addr().String(), nil // taken: the service cannot bind it
+		}
+		return reserveLoopbackPort()
+	}
+	addr, client := newRingTestHostOn(t, reserve)
+	if addr == thief.Addr().String() {
+		t.Fatal("the host reports the port another listener holds")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := client.CreateDatabase(ctx, "app", 0); err != nil {
+		t.Fatalf("the host started after the retry does not serve: %v", err)
 	}
 }

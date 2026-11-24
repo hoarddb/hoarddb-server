@@ -18,7 +18,7 @@ import (
 // It answers what the retired layout raised and this one cannot. VER-17's
 // descriptors, mappings and address space were per-instance and are gone — no
 // server path opens a Badger of its own (storage.OpenBadger has no caller
-// outside bench/bucketdensity) — but the catalog is still O(buckets) resident
+// outside the retired density harness) — but the catalog is still O(buckets) resident
 // on every node. That figure is what a density claim has to be stated against.
 //
 // Three shapes are measured because they differ, and the copy has to know

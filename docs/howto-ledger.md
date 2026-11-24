@@ -109,8 +109,8 @@ If one of those is on your hot path, this is not the layout for it, and the
 ## Try it
 
 Start a server and seed the layout as described on the [How-to](howto.md) page,
-with `-layout ledger`. The transcripts below were captured against that data:
-thirty accounts, each with forty expenses and ten invoices. The seeded amounts and
+with `hoarddb seed ledger`. The transcripts below were captured against that data:
+thirty accounts, each with one hundred expenses and forty invoices. The seeded amounts and
 names are random, so the shape is real and the figures are not.
 
 An account and its expenses, in key order.
@@ -119,9 +119,9 @@ An account and its expenses, in key order.
 [h]oardDB [scenarios_ledger]> use scenarios_ledger
 Switched to database 'scenarios_ledger'
 [h]oardDB [scenarios_ledger]> db.Account["a17"].get()
-{"Currency": "USD", "Expenses": "btreeStore (40 elements)", "Invoices": "hashStore (10 elements)", "Name": "jbkyoqaaw szbackqei", "_id_": "a17"}
+{"Currency": "USD", "Expenses": "btreeStore (100 elements)", "Invoices": "hashStore (40 elements)", "Name": "jbkyoqaaw szbackqei", "_id_": "a17"}
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Expenses.count()
-40
+100
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Expenses.list({limit: 4})
 1700003090-0000  {"amount": 29059, "category": "travel", "currency": "USD"}
 1700003790-0001  {"amount": 16346, "category": "office", "currency": "USD"}
@@ -134,11 +134,11 @@ Record an expense, whose key is the time then the id, and read it back.
 
 ```
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Expenses.put("1700500000-0040", {amount: 12000, category: "travel", currency: "USD"})
-OK  put "1700500000-0040": Expenses now holds 41 elements
+OK  put "1700500000-0040": Expenses now holds 101 elements
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Expenses.get("1700500000-0040")
 {"amount": 12000, "category": "travel", "currency": "USD"}
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Expenses.count()
-41
+101
 ```
 
 The sum is the application's: it lists the account's expenses and adds the
@@ -149,12 +149,12 @@ Invoices, by number, with a deliberate miss.
 
 ```
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Invoices.list({limit: 3})
-INV-000170  {"amount": 434782, "customer": "ehjh px", "due": 1702592000, "number": "INV-000170"}
-INV-000171  {"amount": 345341, "customer": "yr inv", "due": 1702678400, "number": "INV-000171"}
-INV-000172  {"amount": 311594, "customer": "ison aoqgkp", "due": 1702764800, "number": "INV-000172"}
-more: db.Account["a17"].Invoices.list({limit: 3, cursor: "50494e562d3030303137320000"})
+INV-000680  {"amount": 400817, "customer": "ftmpq nmibtwds", "due": 1702592000, "number": "INV-000680"}
+INV-000681  {"amount": 337860, "customer": "vzzcgyojb iknwfujfm", "due": 1702678400, "number": "INV-000681"}
+INV-000682  {"amount": 142247, "customer": "ppoghb srf", "due": 1702764800, "number": "INV-000682"}
+more: db.Account["a17"].Invoices.list({limit: 3, cursor: "50494e562d3030303638320000"})
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Invoices.put("INV-009001", {number: "INV-009001", customer: "acme", amount: 500000, due: 1703000000})
-OK  put "INV-009001": Invoices now holds 11 elements
+OK  put "INV-009001": Invoices now holds 41 elements
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Invoices.get("INV-009001")
 {"amount": 500000, "customer": "acme", "due": 1703000000, "number": "INV-009001"}
 [h]oardDB [scenarios_ledger]> db.Account["a17"].Invoices.get("INV-000999")
@@ -165,9 +165,9 @@ The one read that crosses the kind, by an equality filter on a declared field.
 
 ```
 [h]oardDB [scenarios_ledger]> db.Account.list({filter: {Currency: "EUR"}, limit: 2})
-{"Currency": "EUR", "Expenses": "btreeStore (40 elements)", "Invoices": "hashStore (10 elements)", "Name": "qbuejd epeftsxdc", "_id_": "a3"}
-{"Currency": "EUR", "Expenses": "btreeStore (40 elements)", "Invoices": "hashStore (10 elements)", "Name": "iafh ulmco", "_id_": "a5"}
-more: db.Account.list({filter: {Currency: "EUR"}, limit: 2, cursor: "010000000000000003d0a62a8ad05b8f600160055061350000d0335258"})
+{"Currency": "EUR", "Expenses": "btreeStore (100 elements)", "Invoices": "hashStore (40 elements)", "Name": "qbuejd epeftsxdc", "_id_": "a3"}
+{"Currency": "EUR", "Expenses": "btreeStore (100 elements)", "Invoices": "hashStore (40 elements)", "Name": "iafh ulmco", "_id_": "a5"}
+more: db.Account.list({filter: {Currency: "EUR"}, limit: 2, cursor: "010000000000000001692872e991b7b9f80160055061350000f469ff7f"})
 [h]oardDB [scenarios_ledger]> db.Account.count()
 30
 ```

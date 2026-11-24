@@ -49,14 +49,27 @@ type batchOp struct {
 // check, the client's epoch), so a frame never widens a session's grant. Operations naming
 // one pair then run in request order, one after another; distinct pairs run concurrently,
 // ringBatchInFlight at a time. A refused operation does not stop the others, and there is no
-// atomicity across them.
+// atomicity across them, with one exception: once an operation on a store field of a document is
+// refused, or answered with an outcome the owner cannot vouch for, every later operation on that
+// same store field is refused too (batchStoreOf, batchHoldsBack). A resend runs the refused
+// operation again, and had a later one on its store been applied, the resend would put it behind
+// that one: a queue's elements out of order.
 func (s *ringServer) serveBatch(ctx context.Context, requestID [16]byte, req RingBatchRequest) RingReply {
 	started := time.Now()
 	answers := make([]RingAnswer, len(req.Ops))
 	groups := make(map[pairKey][]batchOp)
 	var order []pairKey
 	memo := newAdmitMemo(false)
+	// refusedAtAdmission holds each store whose operation was refused here, with that
+	// operation's index. All operations on one store fall in one group, run in request order,
+	// so a refusal while they run is tracked by the group (run below).
+	refusedAtAdmission := make(map[batchStoreKey]int)
 	for index, op := range req.Ops {
+		storeKey, onStore := batchStoreOf(op)
+		if earlier, refused := refusedAtAdmission[storeKey]; onStore && refused {
+			answers[index] = ringErrorAnswer(ringHeldBehindRefusal(index, earlier))
+			continue
+		}
 		if ringBatchSpent(req.Prologue.DeadlineMs, started) {
 			// Admission can take a remote lookup per operation, so the deadline stops it too.
 			answers[index] = ringErrorAnswer(ringNotAttempted(index, req.Prologue.DeadlineMs))
@@ -66,6 +79,9 @@ func (s *ringServer) serveBatch(ctx context.Context, requestID [16]byte, req Rin
 		ref, err := s.admitIn(ctx, keyed, memo)
 		if err != nil {
 			answers[index] = ringErrorAnswer(err)
+			if onStore {
+				refusedAtAdmission[storeKey] = index
+			}
 			continue
 		}
 		key := pairKey{slot: ref.slot(op.EncID), db: ref.dbID}
@@ -77,8 +93,20 @@ func (s *ringServer) serveBatch(ctx context.Context, requestID [16]byte, req Rin
 	frame := ringBatchFrame{requestID: requestID, size: len(req.Ops), deadlineMs: req.Prologue.DeadlineMs, started: started,
 		gate: newRingBatchGate(s.resultBudget, s.elementCeiling)}
 	run := func(group []batchOp) {
+		var refused map[batchStoreKey]int
 		for _, op := range group {
+			storeKey, onStore := batchStoreOf(op.keyed.Op)
+			if earlier, held := refused[storeKey]; onStore && held {
+				answers[op.index] = ringErrorAnswer(ringHeldBehindRefusal(op.index, earlier))
+				continue
+			}
 			answers[op.index] = s.runBatchOp(ctx, frame, op)
+			if onStore && batchHoldsBack(answers[op.index]) {
+				if refused == nil {
+					refused = make(map[batchStoreKey]int)
+				}
+				refused[storeKey] = op.index
+			}
 		}
 	}
 	if workers := min(ringBatchInFlight, len(order)); workers <= 1 {
@@ -158,7 +186,11 @@ func (s *ringServer) runBatchOp(ctx context.Context, frame ringBatchFrame, op ba
 		}
 		op.keyed.Prologue.DeadlineMs = uint32(min(int64(frame.deadlineMs), max(1, (left+time.Millisecond-1).Milliseconds())))
 	}
-	reply, err := s.execute(ctx, op.ref, frame.requestID, op.keyed, ringBatchPos{index: uint8(op.index), size: frame.size})
+	execute := s.execute
+	if s.batchExecute != nil {
+		execute = s.batchExecute
+	}
+	reply, err := execute(ctx, op.ref, frame.requestID, op.keyed, ringBatchPos{index: uint8(op.index), size: frame.size})
 	if irreversible {
 		var used int64
 		if err == nil {
@@ -172,6 +204,49 @@ func (s *ringServer) runBatchOp(ctx context.Context, frame ringBatchFrame, op ba
 		return ringErrorAnswer(err)
 	}
 	return RingAnswer{Reply: &reply}
+}
+
+// batchStoreKey names one store field of one document: the unit whose operations a batch keeps
+// in request order across a refusal.
+type batchStoreKey struct {
+	bucketID uint64
+	encID    string
+	fieldID  uint16
+}
+
+// batchStoreOf names the store field op works on, and says whether it works on one. Every class
+// that names one store field is ordered by it: a push or a heap push sets an element's place, a
+// put or an inc of one key is last-writer-wins, a pop or a take removes what the operations
+// before it left, and a claim leases, and an ack, release or extend acts on, what is there when
+// it runs. A document write (insert, upsert, update, delete) is not held back: a batch that
+// inserts a document and then pushes into it, or inserts and then updates, relies on the later
+// operation running when the earlier one is refused because the document exists, and a store
+// verb behind a refused document write fails on its own when the document is missing.
+func batchStoreOf(op cluster.Op) (batchStoreKey, bool) {
+	switch op.Class {
+	case cluster.OpStoreVerb, cluster.OpClaim, cluster.OpAck, cluster.OpRelease, cluster.OpExtend:
+		// The decoder refuses any of these classes that does not name exactly one field.
+		return batchStoreKey{bucketID: op.BucketID, encID: string(op.EncID), fieldID: op.Fields[0].FieldID}, true
+	}
+	return batchStoreKey{}, false
+}
+
+// batchHoldsBack says answer leaves the later operations on its store unsafe to run: a refusal,
+// or a write_outcome of unknown. An unknown outcome is durable on this node but not vouched for
+// (machine.Answer rows E and E'): when this node is no longer the owner, the successor may not
+// hold it, and a later operation applied there would land in front of its resend.
+func batchHoldsBack(answer RingAnswer) bool {
+	return answer.Error != nil || answer.Reply.WriteOutcome == outcomeUnknown
+}
+
+// ringHeldBehindRefusal is the answer of an operation held back because operation earlier, on
+// the same store field of the same document, was refused or has an outcome the owner cannot
+// vouch for. It is UNAVAILABLE, a refusal that clears by resending, because nothing is wrong
+// with the operation itself.
+func ringHeldBehindRefusal(index, earlier int) error {
+	return &cluster.Error{Code: cluster.CodeUnavailable, Message: fmt.Sprintf(
+		"operation %d of the batch was not attempted: operation %d, on the same store of the same document, was refused or its outcome is unknown, and applying this one first could put the store out of order. It was not applied; nothing was changed. Send both again, in order: resending the whole frame with the same request id does that, and an operation already applied answers deduped",
+		index, earlier)}
 }
 
 // ringBatchSpent says the frame's deadline, if it has one, is used up.

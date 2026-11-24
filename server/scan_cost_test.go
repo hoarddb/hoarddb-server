@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// scanCostPostBody is a post of about 1.2 KB, the size bench/social writes.
+// scanCostPostBody is a post of about 1.2 KB, the size a social-feed load writes.
 var scanCostPostBody = strings.Repeat("p", 1200)
 
 // seedScanCostBucket creates a bucket of btype and writes posts documents to
@@ -124,7 +124,7 @@ func TestUnfilteredScanVisitsOnlyThePage(t *testing.T) {
 
 // BenchmarkLIFOScanPage20 measures reading the newest 20 posts of a
 // LIFO timeline, through Server.Scan, at four timeline lengths. Posts are 400
-// to 2,000 bytes, as bench/social writes them.
+// to 2,000 bytes, as a social-feed load writes them.
 func BenchmarkLIFOScanPage20(b *testing.B) {
 	for _, posts := range []int{20, 100, 1000, 10_000} {
 		b.Run(fmt.Sprintf("posts=%d", posts), func(b *testing.B) {

@@ -355,7 +355,7 @@ func (r *alterRun) usable(decl machine.Declaration, found bool) error {
 			map[string]string{"bucket": r.name, "db": r.dbName})}
 	case decl.State != machine.StateActive:
 		return &cluster.Error{Code: cluster.CodeBucketDropping, Message: cluster.CodeBucketDropping.Text(cluster.CondBucketDropping,
-			map[string]string{"bucket": r.name, "db": r.dbName, "n": "0"})}
+			map[string]string{"bucket": r.name, "db": r.dbName})}
 	}
 	return nil
 }

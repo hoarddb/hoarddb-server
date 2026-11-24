@@ -422,9 +422,9 @@ func TestAPeerThatHostsNoneOfThisNodesBucketsIsRefusedBelowTheHorizon(t *testing
 // buckets, even once the log has pruned past that peer's frozen position —
 // and, critically, it must never call dropClient over this, since the
 // connection ship refuses to tear down may be carrying unrelated in-flight
-// client traffic (this was the actual mechanism behind bench/RESULTS.md's
-// "three failing legs": a background replication guard closing a socket a
-// client request was using).
+// client traffic (this was the actual mechanism behind three failing legs of a load
+// test: a background replication guard closing a socket a client request
+// was using).
 func TestShipDoesNotRefuseOrDropIrrelevantPeerBehindHorizon(t *testing.T) {
 	tc := newTestCluster(t, 3, 1) // RF=1: no other member replicates any bucket
 	defer tc.stop()

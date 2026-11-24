@@ -27,8 +27,11 @@ under "Not available yet" the ones that parse and are refused.
   the next item).
 - **Batching is on the wire, not in the CLI.** A batch carries up to 255 writes in
   one request, to any buckets. It is not a transaction: each write is applied or
-  refused on its own, a refused write does not stop the others, and writes to one
-  document apply in the order sent. After a lost answer, resend the whole request
+  refused on its own, and writes to one document apply in the order sent. One
+  exception: when a store write (a push, put, pop, claim and the like) is refused, or its
+  outcome is unknown, the later store writes in that request on the same store of the same
+  document are not run; they are answered refused and nothing is applied for them. Document
+  writes and everything else are not held. After a lost answer, resend the whole request
   with the same request id and the writes that were applied answer `deduped`, for
   as long as they are still inside `replication.dedupe_window`.
   There is no `batch` statement; the Go ring client in the server
@@ -92,6 +95,21 @@ under "Not available yet" the ones that parse and are refused.
 - **A dump is not a point-in-time copy.** Stop the writers for a copy of one
   moment; queue messages that are claimed or dead-lettered, and blob payloads,
   are not in a dump ([Backup and restore](backup-restore.md#what-a-dump-guarantees)).
+- **A dump of a cluster needs every member.** Each member answers only for the data it
+  owns, so `hoarddb dump` reads every member, and it stops instead of writing a file when a
+  member it needs is down or unreachable, when it cannot verify a member's certificate, or
+  when the membership changes while it runs ([Dump a cluster](backup-restore.md#dump-a-cluster)).
+  The 1.1.0 CLI read only the member it connected to and wrote a partial file with exit `0`:
+  upgrade the CLI before you trust a dump of a cluster of more than one node.
+- **`list`, `count` and `show buckets` typed in a session on a cluster answer for the member
+  you are connected to.** Each lists or counts only what that member owns, so on a cluster
+  of more than one node they show part of a bucket or of a database. `get` by id reads any
+  document from any member, and `hoarddb dump` reads every member.
+- **Data in a node's earlier single-node store is not dumped.** Programs that use the earlier
+  driver interface (the public Node and Python drivers, the Go driver's root package) write
+  to a store the ring does not read. `hoarddb dump` refuses when a node holds such data,
+  naming each one, unless you pass `--leave-legacy-store-data`; dump and restore do not carry
+  it, and no command in this release copies it into the ring.
 
 ### Cluster
 

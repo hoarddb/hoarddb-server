@@ -391,8 +391,23 @@ func TestAPeerRestartLeavesNoStaleForwardConnection(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	// The pool must come back to its full width, not stay at the one connection that redialled.
+	// Each call is held until the whole burst is inside the owner (bounded), so the peak shows the
+	// pool's width and not how fast the redials ran on a loaded host: a fixed sleep let the first
+	// calls finish before the last one had dialled.
 	h.peak.Store(0)
-	h.handler = func(context.Context, string) error { time.Sleep(100 * time.Millisecond); return nil }
+	var arrived atomic.Int32
+	burstIn := make(chan struct{})
+	h.handler = func(ctx context.Context, _ string) error {
+		if arrived.Add(1) == int32(ForwardConns) {
+			close(burstIn)
+		}
+		select {
+		case <-burstIn:
+		case <-time.After(5 * time.Second):
+		case <-ctx.Done():
+		}
+		return nil
+	}
 	for i := 0; i < ForwardConns; i++ {
 		wg.Add(1)
 		go func() {

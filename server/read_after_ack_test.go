@@ -70,8 +70,8 @@ func pushPost(c *queryConn, bucket string, seq int64) error {
 }
 
 // TestAckedLIFOPushIsVisibleToTheNextScanOnAnotherConnection is the
-// read-your-writes guard behind the bench/social "newest post has seq 23 with
-// no write in flight, expected 24" investigation: once a push to a LIFO bucket
+// read-your-writes guard behind a load-test investigation ("newest post has seq 23 with
+// no write in flight, expected 24"): once a push to a LIFO bucket
 // is acknowledged on one connection, a scan sent afterwards on a different
 // connection must return that push as the bucket's newest post, and count it.
 //
@@ -81,7 +81,7 @@ func pushPost(c *queryConn, bucket string, seq int64) error {
 // other connections push to and scan their own LIFO buckets throughout, so
 // snapshots, read views and commits interleave with every checked pair. Both
 // scan paths are checked: the unprojected page (scanRawPage, the page reader
-// behind the unfiltered scan) and the {seq: 1} projection bench/social's attach reads
+// behind the unfiltered scan) and the {seq: 1} projection a social-feed attach reads
 // (scanFilteredPage).
 func TestAckedLIFOPushIsVisibleToTheNextScanOnAnotherConnection(t *testing.T) {
 	iterations := 1000

@@ -181,8 +181,8 @@ If one of those is on your hot path, this is not the layout for it, and the
 ## Try it
 
 Start a server and seed the layout as described on the [How-to](howto.md) page,
-with `-layout social`. The transcripts below were captured against that data:
-forty users, ten groups, two hundred posts, and a follow graph in which the
+with `hoarddb seed social`. The transcripts below were captured against that data:
+forty users, ten groups, 1,600 posts, and a follow graph in which the
 busiest user has eight followers. The seeded text is random words, so the shape is
 real and the prose is not. `Drafts` is declared and the seed does not fill it.
 
@@ -207,60 +207,60 @@ u32  {"at": 1700014700, "user": "u32"}
 u6  {"at": 1700003780, "user": "u6"}
 u7  {"at": 1700004200, "user": "u7"}
 [h]oardDB [scenarios_social]> db.Follow.list({filter: {To: "u7"}, limit: 5})
-{"At": 1700004200, "From": "u21", "To": "u7", "_id_": "u21>u7"}
-{"At": 1700003960, "From": "u17", "To": "u7", "_id_": "u17>u7"}
-{"At": 1700003840, "From": "u15", "To": "u7", "_id_": "u15>u7"}
-{"At": 1700004860, "From": "u32", "To": "u7", "_id_": "u32>u7"}
-{"At": 1700004380, "From": "u24", "To": "u7", "_id_": "u24>u7"}
-more: db.Follow.list({filter: {To: "u7"}, limit: 5, cursor: "010000000000000001c797d0a84b08e15c0fa109507532343e75370000c7ac8826"})
+{"At": 1700004200, "From": "u21", "To": "u7", "_id_": "u21\u003eu7"}
+{"At": 1700003960, "From": "u17", "To": "u7", "_id_": "u17\u003eu7"}
+{"At": 1700003840, "From": "u15", "To": "u7", "_id_": "u15\u003eu7"}
+{"At": 1700004860, "From": "u32", "To": "u7", "_id_": "u32\u003eu7"}
+{"At": 1700004380, "From": "u24", "To": "u7", "_id_": "u24\u003eu7"}
+more: db.Follow.list({filter: {To: "u7"}, limit: 5, cursor: "010000000000000001a0fb9c264c31ad0d0fa109507532343e75370000b5d4ca69"})
 ```
 
 Reading a feed by hand: a page of references, then the post by id.
 
 ```
 [h]oardDB [scenarios_social]> db.User["u7"].Feed.list({limit: 2})
-{"at": 1700002400, "post": "p0"}
-{"at": 1700006600, "post": "p70"}
+{"at": 1700004620, "post": "p37"}
+{"at": 1700007020, "post": "p77"}
 more: db.User["u7"].Feed.list({limit: 2, cursor: "0000000000000001"})
 [h]oardDB [scenarios_social]> db.Post["p0"].get()
-{"At": 1700002400, "Author": "u7", "Comments": "fifoStore (3 elements)", "Likes": "hashStore (1 element)", "Text": "pejh you xp kn hxbsubcgj qg fbmwgdaon hddknj wnhnekddq lxz vzme mdx cmbpbgbah dlsqq", "_id_": "p0"}
+{"At": 1700002400, "Author": "u27", "Likes": "hashStore (3 elements)", "Text": "nwrnuqr pejh you xp kn hxbsubcgj qg fbmwgdaon hddknj wnhnekddq lxz vzme mdx cmbpbgbah", "_id_": "p0"}
 [h]oardDB [scenarios_social]> db.User["u7"].Inbox.peek(2)
-{"at": 1700003300, "author": "u31", "post": "p15"}
-{"at": 1700003780, "author": "u31", "post": "p23"}
+{"at": 1700002940, "author": "u31", "post": "p9"}
+{"at": 1700005340, "author": "u31", "post": "p49"}
 ```
 
 Publishing is the post, the author's feed and the followers' inboxes. Here `u7`
 publishes and two followers get it. The application writes each push.
 
 ```
-[h]oardDB [scenarios_social]> db.Post.insert({_id_: "p900", Author: "u7", Text: "first post from the how-to", At: 1700600000})
-OK  id=p900
-[h]oardDB [scenarios_social]> db.User["u7"].Feed.push({post: "p900", at: 1700600000})
-OK  pushed: Feed now holds 5 elements
-[h]oardDB [scenarios_social]> db.User["u14"].Inbox.push({post: "p900", author: "u7", at: 1700600000})
-OK  pushed: Inbox now holds 11 elements
-[h]oardDB [scenarios_social]> db.User["u15"].Inbox.push({post: "p900", author: "u7", at: 1700600000})
-OK  pushed: Inbox now holds 11 elements
+[h]oardDB [scenarios_social]> db.Post.insert({_id_: "p1600", Author: "u7", Text: "first post from the how-to", At: 1700600000})
+OK  id=p1600
+[h]oardDB [scenarios_social]> db.User["u7"].Feed.push({post: "p1600", at: 1700600000})
+OK  pushed: Feed now holds 41 elements
+[h]oardDB [scenarios_social]> db.User["u14"].Inbox.push({post: "p1600", author: "u7", at: 1700600000})
+OK  pushed: Inbox now holds 121 elements
+[h]oardDB [scenarios_social]> db.User["u15"].Inbox.push({post: "p1600", author: "u7", at: 1700600000})
+OK  pushed: Inbox now holds 121 elements
 ```
 
 A comment is on the post, with a notification to the author, which is a LIFO.
 
 ```
-[h]oardDB [scenarios_social]> db.Post["p900"].Comments.push({author: "u14", text: "welcome", at: 1700600100})
+[h]oardDB [scenarios_social]> db.Post["p1600"].Comments.push({author: "u14", text: "welcome", at: 1700600100})
 OK  pushed: Comments now holds 1 element
-[h]oardDB [scenarios_social]> db.User["u7"].Notifications.push({kind: "comment", post: "p900", actor: "u14", at: 1700600100})
-OK  pushed: Notifications now holds 9 elements
+[h]oardDB [scenarios_social]> db.User["u7"].Notifications.push({kind: "comment", post: "p1600", actor: "u14", at: 1700600100})
+OK  pushed: Notifications now holds 68 elements
 ```
 
 A like is a pair of writes, one on each side.
 
 ```
-[h]oardDB [scenarios_social]> db.Post["p900"].Likes.put("u15", {user: "u15", at: 1700600200})
+[h]oardDB [scenarios_social]> db.Post["p1600"].Likes.put("u15", {user: "u15", at: 1700600200})
 OK  put "u15": Likes now holds 1 element
-[h]oardDB [scenarios_social]> db.User["u15"].Likes.put("p900", {post: "p900", at: 1700600200})
-OK  put "p900": Likes now holds 10 elements
-[h]oardDB [scenarios_social]> db.User["u15"].Likes.get("p900")
-{"at": 1700600200, "post": "p900"}
+[h]oardDB [scenarios_social]> db.User["u15"].Likes.put("p1600", {post: "p1600", at: 1700600200})
+OK  put "p1600": Likes now holds 65 elements
+[h]oardDB [scenarios_social]> db.User["u15"].Likes.get("p1600")
+{"at": 1700600200, "post": "p1600"}
 ```
 
 A follow is two store writes and the relationship document.

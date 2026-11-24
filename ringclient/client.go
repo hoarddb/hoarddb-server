@@ -79,9 +79,15 @@ type Client struct {
 }
 
 func trustPolicy(opts Options) (transport.TrustPolicy, error) {
+	var pinned []string
+	for _, fingerprint := range append([]string{opts.Fingerprint}, opts.Fingerprints...) {
+		if fingerprint != "" {
+			pinned = append(pinned, fingerprint)
+		}
+	}
 	switch {
-	case opts.Fingerprint != "":
-		return transport.TrustPolicy{Expected: []string{opts.Fingerprint}}, nil
+	case len(pinned) > 0:
+		return transport.TrustPolicy{Expected: pinned}, nil
 	case opts.Insecure:
 		return transport.TrustPolicy{Insecure: &transport.InsecureTrust{Reason: "ringclient Options.Insecure, local development only"}}, nil
 	}

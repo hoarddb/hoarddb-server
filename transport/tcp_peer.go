@@ -79,7 +79,7 @@ const peerWriteTimeout = 30 * time.Second
 // InternodePoolSize is the per-peer socket pool size for internode TCP
 // connections: one control socket and three request sockets (spec §3.6,
 // OC-3). The descriptor cost is unchanged from the lockstep pool
-// (bench/RESULTS.md records the FD cost of socket concurrency).
+// (each socket costs one descriptor per peer).
 const InternodePoolSize = 4
 
 // PeerControlSocketFrames is the most frames the client keeps in flight on

@@ -50,7 +50,7 @@ func ringFingerprint(stderr io.Writer, fingerprints []string) (string, bool) {
 // insecure warning goes to notice, which is the stream the caller owns for it
 // (the session's transcript on stdout, a verb's report on stderr).
 func dialRingTrusted(ctx context.Context, stderr, notice io.Writer, dial ringclient.Options) (*ringclient.Client, int) {
-	if dial.Fingerprint == "" && !dial.Insecure {
+	if dial.Fingerprint == "" && len(dial.Fingerprints) == 0 && !dial.Insecure {
 		_, _ = fmt.Fprintln(stderr, ringTrustRefusal)
 		return nil, ExitConnect
 	}
@@ -106,31 +106,55 @@ func dialRingForVerb(ctx context.Context, stderr io.Writer, fs *flag.FlagSet, co
 // and its report says the same, so the dial that resolved the credentials is
 // the one place that knows (section 3.2 item 1).
 func dialRingForVerbUser(ctx context.Context, stderr io.Writer, fs *flag.FlagSet, connection *connectionFlags) (*ringclient.Client, string, ringRedial, int) {
+	client, user, _, redial, exit := dialRingVerb(ctx, stderr, fs, connection, false)
+	return client, user, redial, exit
+}
+
+// dialRingForMembers is dialRingForVerbUser for a verb that reads every member of a cluster
+// (dump, restore): each member has its own certificate, so -fingerprint may be given once per
+// member, and the dial options come back so the other members are dialled with the same user,
+// password and trust. The first connection still has to match one of the pins.
+func dialRingForMembers(ctx context.Context, stderr io.Writer, fs *flag.FlagSet, connection *connectionFlags) (*ringclient.Client, string, ringclient.Options, ringRedial, int) {
+	return dialRingVerb(ctx, stderr, fs, connection, true)
+}
+
+// dialRingVerb is the one dial of the standalone verbs; manyPins accepts -fingerprint more than
+// once.
+func dialRingVerb(ctx context.Context, stderr io.Writer, fs *flag.FlagSet, connection *connectionFlags, manyPins bool) (*ringclient.Client, string, ringclient.Options, ringRedial, int) {
 	spec := connection.spec(flagWasProvided(fs, "address"))
 	options, err := resolveConnection(spec)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, terminalSafeText(err.Error()))
-		return nil, "", nil, classify(err).Exit
+		return nil, "", ringclient.Options{}, nil, classify(err).Exit
 	}
 	resolved := NewCLI(options...)
 	if resolved.username == "" || resolved.password == "" {
 		_, _ = fmt.Fprintln(stderr, terminalSafeText(errNoCredentials().Error()))
-		return nil, "", nil, ExitUsage
-	}
-	fingerprint, ok := ringFingerprint(stderr, *connection.fingerprints)
-	if !ok {
-		return nil, "", nil, ExitUsage
+		return nil, "", ringclient.Options{}, nil, ExitUsage
 	}
 	dial := ringclient.Options{
 		Addr: resolved.addr, User: resolved.username, Password: resolved.password,
-		Insecure: *connection.insecure, Fingerprint: fingerprint,
+		Insecure: *connection.insecure,
+	}
+	if manyPins {
+		dial.Fingerprints = append([]string(nil), *connection.fingerprints...)
+	} else {
+		fingerprint, ok := ringFingerprint(stderr, *connection.fingerprints)
+		if !ok {
+			return nil, "", ringclient.Options{}, nil, ExitUsage
+		}
+		dial.Fingerprint = fingerprint
+	}
+	if dial.Fingerprint == "" && len(dial.Fingerprints) == 0 && !dial.Insecure {
+		_, _ = fmt.Fprintln(stderr, ringTrustRefusal)
+		return nil, "", ringclient.Options{}, nil, ExitConnect
 	}
 	// A verb's stdout is its report, so both dial streams are stderr.
 	client, exit := dialRingTrusted(ctx, stderr, stderr, dial)
 	if client == nil {
-		return nil, "", nil, exit
+		return nil, "", ringclient.Options{}, nil, exit
 	}
-	return client, resolved.username, func(ctx context.Context) (*ringclient.Client, error) { return redialRing(ctx, dial) }, ExitOK
+	return client, resolved.username, dial, func(ctx context.Context) (*ringclient.Client, error) { return redialRing(ctx, dial) }, ExitOK
 }
 
 // redialRing opens a second connection with the options of the first. It does

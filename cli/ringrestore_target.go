@@ -105,6 +105,12 @@ type restoreTargetSource interface {
 	DescribeBucket(ctx context.Context, database, bucket string) (ringclient.BucketInfo, error)
 }
 
+// restoreCopiesChecker is a target that knows how many copies it can hold (ringMemberSet), so a
+// dump database it cannot hold is refused in pass 2, before the first create.
+type restoreCopiesChecker interface {
+	checkCopies(dumpName string, copies int32) error
+}
+
 // restoreBucketListPage is how many buckets one ShowBuckets page asks for in pass 2.
 const restoreBucketListPage = 500
 
@@ -124,7 +130,9 @@ type restoreTargetState struct {
 // both count as absent here and the create that follows reports the real reason before
 // anything is written.
 func readTargetState(ctx context.Context, source restoreTargetSource, database string) (restoreTargetState, ringclient.DatabaseDescription, error) {
-	description, err := source.DescribeDatabase(ctx, database, ringclient.PageRequest{Limit: 1})
+	description, err := retryQuorumCtx(ctx, func() (ringclient.DatabaseDescription, error) {
+		return source.DescribeDatabase(ctx, database, ringclient.PageRequest{Limit: 1})
+	})
 	if err != nil {
 		var refusal *ringclient.Error
 		if errors.As(err, &refusal) && (refusal.Code == cluster.CodePermissionDenied || refusal.Code == cluster.CodeNotFound) {
@@ -135,7 +143,9 @@ func readTargetState(ctx context.Context, source restoreTargetSource, database s
 	state := restoreTargetState{exists: true}
 	var cursor []byte
 	for {
-		page, err := source.ShowBuckets(ctx, database, ringclient.PageRequest{Limit: restoreBucketListPage, Cursor: cursor})
+		page, err := retryQuorumCtx(ctx, func() (ringclient.BucketPage, error) {
+			return source.ShowBuckets(ctx, database, ringclient.PageRequest{Limit: restoreBucketListPage, Cursor: cursor})
+		})
 		if err != nil {
 			return state, description, fmt.Errorf("listing the buckets of database %q on the target: %w", database, err)
 		}
@@ -280,6 +290,9 @@ func checkRestoreDatabase(ctx context.Context, flags *ringRestoreFlags, source r
 		return err
 	}
 	if !state.exists {
+		if capacity, ok := source.(restoreCopiesChecker); ok {
+			return capacity.checkCopies(record.Name, record.RF)
+		}
 		return nil
 	}
 	renameCommand := fmt.Sprintf("hoarddb restore %s --db %s --as %s", flags.file, terminalSafeText(record.Name), terminalSafeText(target+"_restored"))
@@ -404,7 +417,15 @@ func (r *ringRestoreRun) checkBucketAbsent(flags *ringRestoreFlags, dumpDatabase
 // the restore reaches it: an application can write to it from the moment it exists. It reads
 // one entry. The window that remains is the round trip between this read and the first insert.
 func (r *ringRestoreRun) checkBucketStillEmpty(flags *ringRestoreFlags, dumpDatabase, bucket, target string) error {
-	page, err := r.client.Bucket(target, bucket).List(r.ctx, nil, ringclient.PageRequest{Limit: 1})
+	list := func(ctx context.Context) (ringclient.EntryPage, error) {
+		return r.client.Bucket(target, bucket).List(ctx, nil, ringclient.PageRequest{Limit: 1})
+	}
+	if r.members != nil {
+		list = func(ctx context.Context) (ringclient.EntryPage, error) {
+			return r.members.ListDocuments(ctx, target, bucket, ringclient.PageRequest{Limit: 1})
+		}
+	}
+	page, err := list(r.ctx)
 	if err != nil {
 		return fmt.Errorf("checking that bucket %q of database %q is still empty: %w", bucket, target, err)
 	}

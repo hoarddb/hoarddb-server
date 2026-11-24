@@ -718,20 +718,42 @@ func (n *Node) catchUpSourceVia(links positionAsker, slot uint16, db uint64) (st
 		}
 	}
 	var offers []catchUpOffer
+	var silent []error
 	for _, id := range candidates {
 		ctx, cancel := context.WithTimeout(n.cl.ctx, linkCallTimeout)
 		reply, err := links.QueryPosition(ctx, id, PositionQuery{Slot: slot, DB: db})
 		cancel()
 		if err != nil {
+			silent = append(silent, err)
 			continue // unreachable: not a source
 		}
 		offers = append(offers, catchUpOffer{ID: id, Reply: reply})
 	}
-	best, found := chooseCatchUpSource(own, offers)
-	if !found {
-		return "", ErrNoCatchUpSource
+	if len(silent) > 0 && !n.ownerAnswered(slot, db, offers) {
+		// A live copy that did not answer may be ahead of every one that did, with a degraded
+		// write only it holds: reaching the best answer would mark the pair current on no evidence
+		// and let a new owner open behind it (BUG-0926). A copy that is not the owner reads from
+		// the owner, which ordered every write of the epoch, whatever another copy does.
+		return "", fmt.Errorf("%d of the copies of slot %d of database %d did not answer, so no catch-up source is taken and the pair is not taken as current; the catch-up asks again: %w",
+			len(silent), slot, db, errors.Join(silent...))
 	}
-	return best, nil
+	best, found := chooseCatchUpSource(own, offers)
+	if found {
+		return best, nil
+	}
+	return "", ErrNoCatchUpSource
+}
+
+// ownerAnswered reports whether the pair's owner is another node that answered as a ready copy:
+// the one source a copy may catch up from while another copy is silent.
+func (n *Node) ownerAnswered(slot uint16, db uint64, offers []catchUpOffer) bool {
+	owner, ok := n.ownerOf(slot, db)
+	if !ok || owner == n.cfg.NodeID {
+		return false
+	}
+	return slices.ContainsFunc(offers, func(offer catchUpOffer) bool {
+		return offer.ID == owner && offer.Reply.State == PositionStateReady
+	})
 }
 
 // catchUpOffer is one copy's answer to POSITION_QUERY.

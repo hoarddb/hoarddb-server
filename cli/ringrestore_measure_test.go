@@ -121,10 +121,25 @@ func TestRestoreMemoryIsBoundedByOneFrame(t *testing.T) {
 	// A tight collector, so a frame that was let go is not counted as held.
 	previous := debug.SetGCPercent(10)
 	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	held, applyErr := heapHeldAbove(harness.applier.apply)
+	if applyErr != nil {
+		t.Fatalf("apply: %v", applyErr)
+	}
+	t.Logf("measurement: dump file %d MiB, frame cap %d MiB, restore held at most %d MiB above its start", info.Size()>>20, restoreFrameByteCap>>20, held>>20)
+	if bound := int64(4 * restoreFrameByteCap); held > bound {
+		t.Errorf("the restore held %d MiB, over %d MiB (four frames); the file is %d MiB", held>>20, bound>>20, info.Size()>>20)
+	}
+}
+
+// heapSampleInterval is how often heapHeldAbove reads the heap while run is going.
+const heapSampleInterval = 2 * time.Millisecond
+
+// heapHeldAbove runs run and returns the most reachable heap above where it began, sampled every
+// heapSampleInterval, and run's error.
+func heapHeldAbove(run func() error) (int64, error) {
 	runtime.GC()
 	var base runtime.MemStats
 	runtime.ReadMemStats(&base)
-
 	var (
 		mutex sync.Mutex
 		peak  uint64
@@ -138,7 +153,10 @@ func TestRestoreMemoryIsBoundedByOneFrame(t *testing.T) {
 			select {
 			case <-done:
 				return
-			case <-time.After(2 * time.Millisecond):
+			case <-time.After(heapSampleInterval):
+				// HeapAlloc counts garbage not yet swept, so collect first: the peak is then
+				// what is reachable, which is what the restore holds.
+				runtime.GC()
 				var now runtime.MemStats
 				runtime.ReadMemStats(&now)
 				mutex.Lock()
@@ -147,16 +165,59 @@ func TestRestoreMemoryIsBoundedByOneFrame(t *testing.T) {
 			}
 		}
 	}()
-	applyErr := harness.applier.apply()
+	runErr := run()
 	close(done)
 	wait.Wait()
-	if applyErr != nil {
-		t.Fatalf("apply: %v", applyErr)
+	return int64(peak) - int64(base.HeapAlloc), runErr
+}
+
+// TestHeapHeldAboveDoesNotCountGarbageTheCollectorHasNotSwept (BUG-0916): run lets go of every
+// buffer it allocates, with the collector off so none is swept while it runs. The restore memory
+// test fails about one run in four because HeapAlloc counts that garbage, so the sampler must
+// collect before it reads.
+func TestHeapHeldAboveDoesNotCountGarbageTheCollectorHasNotSwept(t *testing.T) {
+	const buffers, bufferBytes = 16, 8 << 20
+	previous := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	var sink []byte
+	held, err := heapHeldAbove(func() error {
+		for range buffers {
+			sink = make([]byte, bufferBytes)
+			sink[0] = 1
+			// Paced, because a collection that runs while the loop allocates counts the
+			// buffers allocated meanwhile as live; a few are expected, all of them are not.
+			time.Sleep(2 * heapSampleInterval)
+		}
+		sink = nil
+		time.Sleep(10 * heapSampleInterval)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	held := int64(peak) - int64(base.HeapAlloc)
-	t.Logf("measurement: dump file %d MiB, frame cap %d MiB, restore held at most %d MiB above its start", info.Size()>>20, restoreFrameByteCap>>20, held>>20)
-	if bound := int64(4 * restoreFrameByteCap); held > bound {
-		t.Errorf("the restore held %d MiB, over %d MiB (four frames); the file is %d MiB", held>>20, bound>>20, info.Size()>>20)
+	if bound := int64(buffers / 2 * bufferBytes); held > bound {
+		t.Fatalf("the sampler counted %d MiB held, over %d MiB, with one 8 MiB buffer live at a time", held>>20, bound>>20)
+	}
+}
+
+// TestRestoreMemoryBoundBitesWhenTheRestoreHoldsTheBucket (BUG-0916): the same restore through
+// the scripted transport, which keeps every frame, holds about the whole dump, and the bound the
+// real test asserts is what must catch it.
+func TestRestoreMemoryBoundBitesWhenTheRestoreHoldsTheBucket(t *testing.T) {
+	const entities, elementsPerEntity, elementBytes = 80, 4, 600 << 10
+	path := writeLargeRestoreDump(t, entities, 1, elementsPerEntity, elementBytes)
+	addr, _ := newRingTestHost(t)
+	harness := newRestoreHarness(t, addr, path, ringRestoreFlags{})
+	keeping := &scriptedRestoreTransport{answer: func(_ int, ops []restoreOp) []ringDocAnswer { return make([]ringDocAnswer, len(ops)) }}
+	harness.sender.transport = keeping
+	previous := debug.SetGCPercent(10)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	held, err := heapHeldAbove(harness.applier.apply)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if bound := int64(4 * restoreFrameByteCap); held <= bound {
+		t.Fatalf("a restore that kept every frame held %d MiB, not over the %d MiB bound the memory test asserts", held>>20, bound>>20)
 	}
 }
 

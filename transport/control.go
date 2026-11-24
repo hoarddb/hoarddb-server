@@ -464,8 +464,11 @@ func (s *ChannelServer) answer(conn net.Conn, from Handshake, frame *Frame) erro
 	if !admitted {
 		return refuseWith(ErrOverloaded, fmt.Sprintf("the %s channel of this node is handling its limit of requests (%d in all, %d for one peer). Retry shortly; the limits are cluster.peer_max_in_flight", s.channel, cap(s.inFlight), s.limits.PerPeerInFlight))
 	}
-	defer release()
 	reply, err := s.handle(s.ctx, from, Message{Env: env, Body: frame.Payload[EnvelopeSize:]})
+	// The slot limits requests being handled, so it is freed before the reply is written: a
+	// caller that sends its next request the moment it reads this reply is then not refused
+	// for a slot this request still holds.
+	release()
 	if err != nil {
 		return refuseWith(ErrInternal, err.Error())
 	}

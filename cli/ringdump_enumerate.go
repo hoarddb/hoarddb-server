@@ -101,7 +101,9 @@ func (r *ringDumpRun) enumerate() error {
 	}
 	var cursor []byte
 	for {
-		page, err := r.source.ShowDatabases(r.ctx, ringclient.PageRequest{Cursor: cursor})
+		page, err := retryQuorum(r, func() (ringclient.DatabasePage, error) {
+			return r.source.ShowDatabases(r.ctx, ringclient.PageRequest{Cursor: cursor})
+		})
 		if err != nil {
 			return fmt.Errorf("listing the databases this session may see: %w", err)
 		}
@@ -124,7 +126,9 @@ func (r *ringDumpRun) enumerate() error {
 // come from DescribeDatabase; its bucket list is ignored, because the buckets are paged
 // by ShowBuckets, where a dropping one can be told apart.
 func (r *ringDumpRun) dumpDatabase(name string) error {
-	description, err := r.source.DescribeDatabase(r.ctx, name, ringclient.PageRequest{Limit: 1})
+	description, err := retryQuorum(r, func() (ringclient.DatabaseDescription, error) {
+		return r.source.DescribeDatabase(r.ctx, name, ringclient.PageRequest{Limit: 1})
+	})
 	if err != nil {
 		return fmt.Errorf("describing database %q: %w", name, err)
 	}
@@ -144,7 +148,9 @@ func (r *ringDumpRun) dumpBuckets(database string) error {
 	}
 	var cursor []byte
 	for {
-		page, err := r.source.ShowBuckets(r.ctx, database, ringclient.PageRequest{Cursor: cursor})
+		page, err := retryQuorum(r, func() (ringclient.BucketPage, error) {
+			return r.source.ShowBuckets(r.ctx, database, ringclient.PageRequest{Cursor: cursor})
+		})
 		if err != nil {
 			return fmt.Errorf("listing the buckets of database %q: %w", database, err)
 		}
@@ -169,7 +175,9 @@ func (r *ringDumpRun) dumpBuckets(database string) error {
 // operator cannot act on: a named bucket keeps its refusal when it has vanished, and a
 // listed one becomes a warning and the run goes on with the next bucket (Db4b).
 func (r *ringDumpRun) dumpBucket(database, name string, named bool) error {
-	declaration, err := r.source.DescribeBucket(r.ctx, database, name)
+	declaration, err := retryQuorum(r, func() (ringclient.BucketInfo, error) {
+		return r.source.DescribeBucket(r.ctx, database, name)
+	})
 	if err != nil {
 		var refusal *ringclient.Error
 		if named && errors.As(err, &refusal) && refusal.Code == cluster.CodeNotFound {

@@ -107,8 +107,13 @@ for every upgrade that touches a data directory.
    catch up.
 2. **Stop every node.**
 3. **Copy each node's whole data directory.** `dump` is not a substitute: it
-   leaves out blob payloads and user accounts. A copy of the directory keeps
-   both.
+   leaves out blob payloads and user accounts, and it does not carry data in a
+   node's earlier single-node store (what programs using the earlier driver
+   interface wrote: the public Node and Python drivers, the Go driver's root
+   package). `dump` refuses when a node holds such data, unless you pass
+   `--leave-legacy-store-data`, and `restore` cannot put it back. A copy of the
+   directory keeps all of it. On a cluster, use this release's CLI for any dump:
+   the 1.1.0 CLI dumped only the member it connected to.
 4. **Install the new build on every node.**
 5. **Start every node.** Check `hoarddb-server -v` on each, then `status` and
    `nodes` from the CLI.

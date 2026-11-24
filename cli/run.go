@@ -70,6 +70,7 @@ var verbRunners = map[string]func(args []string) int{
 	"restore": restoreEntry,
 	"ingest":  RunRingIngestCommand,
 	"plan":    RunPlanCommand,
+	"seed":    RunSeedCommand,
 }
 
 // globalFlags are the flags of a session (REPL or piped statements).
@@ -222,7 +223,7 @@ func registerGlobalFlags(fs *flag.FlagSet) *globalFlags {
 func printUsage(fs *flag.FlagSet) {
 	output := fs.Output()
 	_, _ = fmt.Fprint(output, `Usage: hoarddb [flags]
-       hoarddb dump|restore|ingest|plan [flags] ...   (a verb must come first)
+       hoarddb dump|restore|ingest|plan|seed [flags] ...   (a verb must come first)
 
 With no verb, hoarddb opens an interactive session, or runs the statements
 piped on its standard input.
@@ -234,6 +235,7 @@ Examples:
   hoarddb restore app.hoarddump                                       restore it
   hoarddb ingest users.bson --into app.users                          load a file into a bucket
   hoarddb plan users.bson posts.bson --no-input                       suggest a design from your data
+  hoarddb seed agent --insecure                                       load an example data set from the how-to pages
   hoarddb dump -h                                                     the flags of one verb
 
 Flags:

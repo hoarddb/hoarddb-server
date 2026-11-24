@@ -18,9 +18,11 @@ import (
 // session-only options (theme, debug, password source) to the shared ones.
 var connectCallSites = map[string][]string{
 	// ringdial.go:dialRing builds a CLI only to reuse its AUTH and TLS options for the
-	// ringclient connection; ringdial.go:dialRingForVerbUser does the same for the verbs (dialRingForVerb wraps it; the dump verb needs the user name it resolved);
+	// ringclient connection; ringdial.go:dialRingVerb does the same for the verbs (dialRingForVerb,
+	// dialRingForVerbUser and dialRingForMembers wrap it; dump and restore need the dial options to
+	// reach every member);
 	// U54 deletes the legacy engine and with it this entry.
-	"NewCLI":              {"connect.go:connectSession", "run.go:runSession", "ringdial.go:dialRing", "ringdial.go:dialRingForVerbUser"},
+	"NewCLI":              {"connect.go:connectSession", "run.go:runSession", "ringdial.go:dialRing", "ringdial.go:dialRingVerb"},
 	"dialAndAuthenticate": {"connect.go:connectSession", "cli.go:Connect"},
 }
 

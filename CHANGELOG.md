@@ -10,6 +10,62 @@ such as a changed setting or a changed on-disk layout, is listed under **Changed
 or **Removed** with what to do about it. The rules for upgrading are in
 [docs/user/compatibility.md](docs/compatibility.md).
 
+## [1.1.1]
+
+### Fixed
+
+- **An insert sent right after a node restart could be acknowledged and not written.** For a few seconds after a cluster node restarts, and while a member returns or ownership of a slot moves, the node holds the slot and orders no write. An insert sent through a driver or the CLI in that window was answered `applied`, with no copy confirmed and position 0:0, and the document was never stored. It is now refused `UNAVAILABLE` with "Nothing was written. Retry it in a few seconds", as every other write already was; a retry with the same request id is safe. Inserts the 1.1 server acknowledged with `copies_confirmed` 0 were not stored: write them again.
+- **An insert answered `applied` when its write concern was not met.** An insert stored on fewer copies than its concern asks for (for example on one node of two while the other is down) was answered `applied`; it now carries the outcome the owner decided, `applied_degraded` or `unknown`, as updates, deletes and store writes already did.
+- **The lost-majority refusal and the dropping-bucket refusal print no unfilled figures.** A read refused because the node could not see a majority of its voters printed `<v> voters (<n> answered)` as written, a write printed `too few answered`, and a refusal of a bucket being dropped printed `<n> of 8192 slots swept` or `0 of 8192`. The texts now say how many voters the cluster has where the node knows it, and no longer name a count the node does not have.
+- **`hoarddb dump` and `hoarddb restore` wait out a brief loss of quorum instead of stopping.** A cluster member that had not seen a majority of its voters for a moment, or had not yet renewed its lease, ended the whole dump or restore. Both now ask again after a short, growing wait, for up to a minute, and a dump still reads each entity once. A member that stays without a majority for that minute stops the run with the same message as before, which names the fix.
+- **A batch that has an operation on a store refused now leaves the later operations on that store unapplied, so their order is kept.** The server used to go on with the rest of the batch, so a push refused in a brief loss of quorum could be followed by an applied push to the same store, and sending the refused one again put it behind. The later operations on that store, also those behind an operation whose outcome the server could not confirm, are now refused with a message that says so and that nothing was applied; send them again in order, which resending the batch with the same request id does. Operations on other stores and documents in the batch carry on as before, and `hoarddb restore` resends such a batch instead of stopping.
+- **Writes accepted with one copy while an owner was down could be lost when it came back.** At replication factor 2,
+a write to a slot whose owner was down was stored on the one other copy (at 3, the same held for a write that reached
+only one copy). When the owner returned and that copy did not
+answer it at once (it can miss the first seconds after a restart), the owner took the slot back without the write, and
+the other copy then dropped it too. A returning or restarted owner now waits until the copy that took its writes has
+answered; while it waits, writes to that slot are refused with a retryable error. If that copy cannot come back, the
+cluster marks it down after `failover_ms` and the slot opens without what only it held; `replace-node` replaces a node
+that will never return. The same wait applies to any handoff, a `join` for one: a new owner takes a slot only when every
+live copy and holder has answered it, so at replication factor 3 a handoff can wait while one copy is unreachable from
+the new owner, where two copies were enough before. The wait ends when that copy answers or is committed down; if the
+leader reaches the copy and the new owner does not, the wait lasts until the network heals. Writes to that slot are
+refused with a retryable error meanwhile. No per-bucket cost; O(1) in buckets; no per-bucket metric.
+- **`hoarddb dump` on a cluster of more than one node wrote a partial backup and exited 0.** Each member of a cluster
+answers listings only for the data it owns, and the 1.1 dump read through the one member it connected to, so its file
+held that member's share and said nothing. The dump now connects to every data member and reads each one's share, and
+every database, bucket, entity and store element is in the file once. It stops with no file, naming the member and
+the fix, when a member it needs is down or cannot be reached, when a member's certificate matches no `--fingerprint`
+(it never falls back to an unverified connection), or when the cluster's membership changes while it runs. Two dumps of
+a quiet cluster hold the same records in the same order whichever member they went through. **Take a new dump of every
+cluster with this CLI; dumps the 1.1 CLI took of a cluster of more than one node are incomplete.** Single-node dumps
+were not affected. The file format is unchanged: the 1.1 `restore` reads the new files, and the new CLI dumps 1.1
+servers.
+- **`hoarddb restore` into a cluster checked only one member for existing data.** Its refusal of a database that
+already holds buckets now reads every member, so it no longer misses buckets another member lists.
+- **`hoarddb restore` refused a database it could not hold only after creating the ones before it.** A dump database
+with more copies than the target cluster can hold is now refused before anything is created.
+
+### Added
+
+- **`--fingerprint` once per member, and `--member <node id>=<host:port>`, on `dump` and `restore`.** Every member has
+its own certificate, so `--fingerprint` may be repeated. `--member` gives the client address of a member that publishes
+none (a client listener on a loopback or wildcard address with no `HOARDDB_TCP_ADVERTISE`).
+- **`hoarddb dump` refuses when a node holds data in its earlier single-node store.** Programs using the earlier
+driver interface (the public Node and Python drivers, the Go driver's root package) write to a store the ring does not
+read, and dump and restore do not carry it. The 1.1 dump left it out without a word. The dump now asks every node,
+refuses with exit 2 naming the nodes that hold such data, and goes on only with `--leave-legacy-store-data`, in which
+case it says at its start and its end that the data is not in the file and carries the lines in `--json` as
+`earlier_store_left_out`. No command copies that data into the ring yet.
+- **`hoarddb seed` loads the example data the how-to pages use.** `hoarddb seed agent --insecure` creates a database named
+`scenarios_agent` on a running ring server and fills it with the generated sample data of one how-to page, the same on every run,
+so the transcripts on those pages match what you see. The layouts are `social`, `chat`, `ledger`, `agent`, `video` and `all`;
+each goes into its own database, `scenarios_<layout>`, or `<name>_<layout>` with `--database <name>` (`--database demo` gives
+`demo_agent`). It takes the connection flags of the other commands, and `--insecure` for a server you started yourself. It refuses a
+database that already holds the layout's buckets before it writes anything, and prints the `drop bucket` lines that empty it or
+the `--database` name to use instead. It creates a fixed set of buckets per layout (social 4, chat 3, ledger 1, agent 3, video 3;
+14 for `all`), however much data it loads; no per-bucket metric.
+
 ## [1.1]
 
 ### Added

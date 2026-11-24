@@ -453,6 +453,7 @@ func (g *ReadGate) refusalFor(code cluster.Code, req ReadRequest, lease machine.
 	if code == cluster.CodeSchemaNotCurrent {
 		condition = fillSchemaNotCurrent(args, g.cfg.Schema, g.cfg.Topology, req.DBID, req.BucketID)
 	}
+	args["v"] = strconv.Itoa(g.cfg.Topology.Members())
 	if code == cluster.CodeLeaseLapsed {
 		fillLeaseLapsed(args, lease, g.cfg.Clock.BootNow(), g.cfg.Topology)
 	}

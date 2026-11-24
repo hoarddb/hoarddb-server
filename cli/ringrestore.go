@@ -56,7 +56,9 @@ type ringRestoreFlags struct {
 	// database restores only that database of the dump; empty restores every one.
 	database string
 	// as renames the one database --db selects.
-	as      string
+	as string
+	// members are the --member client addresses of cluster members that publish none.
+	members ringMemberAddresses
 	jsonOut bool
 	verify  bool
 }
@@ -85,7 +87,8 @@ func parseRingRestoreArgs(args []string, env ringRestoreEnv) (*ringRestoreFlags,
 	flagSet := flag.NewFlagSet("hoarddb restore", flag.ContinueOnError)
 	flagSet.SetOutput(&usage)
 	parsed := &ringRestoreFlags{connection: registerConnectionFlags(flagSet), flagSet: flagSet}
-	flagSet.Lookup("fingerprint").Usage = "pin the server's certificate fingerprint, SHA256:<64 hex>; the server prints it when it starts (or pass -insecure for a node you started yourself)"
+	flagSet.Lookup("fingerprint").Usage = "pin a server's certificate fingerprint, SHA256:<64 hex>; each server prints its own when it starts. On a cluster restore reads every member, so repeat it once per member (or pass -insecure for nodes you started yourself)"
+	flagSet.Var(&parsed.members, "member", ringMemberFlagUsage)
 	flagSet.StringVar(&parsed.database, "db", "", "restore only this database of the dump")
 	flagSet.StringVar(&parsed.as, "as", "", "restore the database --db selects under this name")
 	flagSet.BoolVar(&parsed.jsonOut, "json", false, "print one JSON result object to stdout as well as the text lines on stderr")
@@ -175,7 +178,7 @@ func runRingRestore(ctx context.Context, args []string, env ringRestoreEnv) int 
 		_, _ = fmt.Fprintln(env.stderr, restoreQueueLeftOutLine)
 	}
 
-	client, redial, exit := dialRingForVerb(ctx, env.stderr, flags.flagSet, flags.connection)
+	client, _, options, redial, exit := dialRingForMembers(ctx, env.stderr, flags.flagSet, flags.connection)
 	if client == nil {
 		return exit
 	}
@@ -191,7 +194,31 @@ func runRingRestore(ctx context.Context, args []string, env ringRestoreEnv) int 
 		sourceInfo:   sourceInfo,
 		started:      time.Now(),
 	}
+	// The checks that the target is empty list buckets and documents, which a cluster member
+	// answers only for what it owns, so they read every member (BUG-0903). Writes still go
+	// through the one connection: a member forwards a write to its owner.
+	members, err := openRingMembers(ctx, ringMemberDial{entry: client, options: options, addresses: flags.members, notice: env.stderr, verb: "restore"}, restoreScope(flags))
+	if err != nil {
+		return run.refuse(withNothingWritten(err))
+	}
+	defer members.close()
+	run.members, run.target = members, members
 	return run.execute()
+}
+
+// restoreScope is the target databases a restore can touch, for the member set's check that each
+// has an owner for every slot: the --db one under its --as name, or every database (nil).
+func restoreScope(flags *ringRestoreFlags) []string {
+	if flags.database == "" {
+		return nil
+	}
+	return []string{flags.restoreTargetName(flags.database)}
+}
+
+// withNothingWritten adds restore's sentence to a refusal that came before any write.
+func withNothingWritten(err error) error {
+	failed := ringFailure(err)
+	return &RingError{Code: failed.Code, Exit: failed.Exit, Err: err, Message: strings.TrimSuffix(failed.Message, ".") + ". Nothing was written."}
 }
 
 // refuseRingRestore prints a refusal that ended the run before the server was contacted
@@ -237,6 +264,11 @@ type ringRestoreRun struct {
 	redial       ringRedial
 	// target answers the pass-2 reads; nil means the client, and a test replaces it.
 	target restoreTargetSource
+	// creator answers the creates of pass 3; nil means the client, and a test replaces it.
+	creator restoreCreateSource
+	// members is the cluster's member set, nil when a test drives the run without one: the
+	// emptiness checks read every member.
+	members *ringMemberSet
 	// links is pass 2's order for the buckets that take part in a link.
 	links *restoreLinkPlan
 	// sourceInfo is the dump's size and time as pass 1 saw them.

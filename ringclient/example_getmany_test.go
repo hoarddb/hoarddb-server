@@ -10,8 +10,8 @@ import (
 
 // ExampleBucket_GetMany reads a user's feed the way an application does: one page of the user's own
 // feed store (post ids), then every post of the page in one frame instead of one Get each. It needs
-// a server with the social layout of the how-to page (`go run ./bench/scenarios -engine hoarddb
-// -layout social`), so it is compiled by go test and not run.
+// a server with the social layout of the how-to page (`hoarddb seed social`), so it is compiled by
+// go test and not run.
 func ExampleBucket_GetMany() {
 	ctx := context.Background()
 	client, err := ringclient.Dial(ctx, ringclient.Options{

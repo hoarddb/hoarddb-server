@@ -101,6 +101,12 @@ type ringDumpFlags struct {
 	// parallel is how many entities of one List page are read at once (section 3.3). 1
 	// reads them one at a time, straight into the file, with no buffer.
 	parallel int
+	// members are the --member client addresses of cluster members that publish none.
+	members ringMemberAddresses
+	// leaveLegacyStoreData lets a dump go on when a node also holds data in its earlier
+	// single-node store, which a ring dump does not carry; the run then says so at its start
+	// and its end.
+	leaveLegacyStoreData bool
 }
 
 // dumpUsageError is a flag, an argument or a file problem the dump refused before it wrote
@@ -135,6 +141,9 @@ type ringDumpJSON struct {
 	// not in the file (section 3.1, rev 7). The text is the sentence the run printed.
 	QueueMessagesLeftOut     bool   `json:"queue_messages_left_out,omitempty"`
 	QueueMessagesLeftOutText string `json:"queue_messages_left_out_text,omitempty"`
+	// EarlierStoreLeftOut holds the lines the run printed for members whose earlier single-node
+	// store holds buckets this file does not carry.
+	EarlierStoreLeftOut []string `json:"earlier_store_left_out,omitempty"`
 }
 
 // ringDumpJSONConsistency is the header's consistency word and the statement it maps to,
@@ -185,21 +194,41 @@ func runRingDumpWithSource(ctx context.Context, args []string, env ringDumpEnv, 
 	if err := flags.validate(); err != nil {
 		return refuseRingDump(env, flags, err)
 	}
+	var members *ringMemberSet
+	var earlierStore []string
 	if source == nil {
-		client, dialedUser, _, exit := dialRingForVerbUser(ctx, env.stderr, flags.flagSet, flags.connection)
+		client, dialedUser, options, _, exit := dialRingForMembers(ctx, env.stderr, flags.flagSet, flags.connection)
 		if client == nil {
 			return exit
 		}
 		defer func() { _ = client.Close() }()
-		source, user = ringClientSource{client: client}, dialedUser
+		// Every member answers for the slots it owns, so the dump reads all of them (BUG-0903).
+		opened, err := openRingMembers(ctx, ringMemberDial{entry: client, options: options, addresses: flags.members, notice: env.stderr, verb: "dump"}, flags.databases)
+		if err != nil {
+			run := &ringDumpRun{ctx: ctx, stderr: inertWriter{env.stderr}, flags: flags}
+			return run.fail(env, err)
+		}
+		defer opened.close()
+		members = opened
+		var holders []string
+		earlierStore, holders = earlierStoreNotes(ctx, opened)
+		if len(holders) > 0 && !flags.leaveLegacyStoreData {
+			// Owner ruling 2026-11-23: refuse, so a backup that leaves data behind is a choice
+			// the operator makes with the flag, not something a log line reports afterwards.
+			run := &ringDumpRun{ctx: ctx, stderr: inertWriter{env.stderr}, flags: flags}
+			return run.fail(env, &RingError{Exit: ExitRefused, Message: earlierStoreRefusal(holders, earlierStore)})
+		}
+		source, user = ringFanoutSource{ringClientSource: ringClientSource{client: client}, members: opened}, dialedUser
 	}
 	run := &ringDumpRun{
-		ctx:      ctx,
-		source:   source,
-		stderr:   inertWriter{env.stderr},
-		flags:    flags,
-		user:     user,
-		parallel: flags.parallel,
+		members:      members,
+		earlierStore: earlierStore,
+		ctx:          ctx,
+		source:       source,
+		stderr:       inertWriter{env.stderr},
+		flags:        flags,
+		user:         user,
+		parallel:     flags.parallel,
 	}
 	return run.execute(env)
 }
@@ -225,7 +254,9 @@ func parseRingDumpArgs(args []string, env ringDumpEnv) (*ringDumpFlags, error) {
 	parsed := &ringDumpFlags{connection: registerConnectionFlags(fs), flagSet: fs}
 	// The ring pins a fingerprint (ringdial.go), which the legacy flag text still calls
 	// unsupported.
-	fs.Lookup("fingerprint").Usage = "pin the server's certificate fingerprint, SHA256:<64 hex>; the server prints it when it starts (or pass -insecure for a node you started yourself)"
+	fs.Lookup("fingerprint").Usage = "pin a server's certificate fingerprint, SHA256:<64 hex>; each server prints its own when it starts. On a cluster the dump reads every member, so repeat it once per member (or pass -insecure for nodes you started yourself)"
+	fs.Var(&parsed.members, "member", ringMemberFlagUsage)
+	fs.BoolVar(&parsed.leaveLegacyStoreData, leaveLegacyStoreFlag, false, "dump the ring even when a node also holds data in its earlier single-node store; that data is not in the file, and the run says so")
 	fs.StringVar(&parsed.out, "out", ringDefaultDumpName(time.Now()), "the file to write; a plain name goes in the current directory")
 	fs.Var(&parsed.databases, "db", "dump only this database; repeat for more than one")
 	fs.StringVar(&parsed.bucket, "bucket", "", "dump only this bucket; needs exactly one --db")
@@ -289,12 +320,23 @@ type ringDumpRun struct {
 	// created with the writer, before the first buffer, and it holds no file until an
 	// entity is large enough to need one.
 	spiller *dumpSpiller
+	// members is the cluster's member set the source reads, nil for a source a test supplies.
+	// The run checks at its end that no member's view changed (ringmembers.go).
+	members *ringMemberSet
+	// earlierStore is one line per member whose earlier single-node store holds buckets: that
+	// data is not read by any ring request, so it is not in the file, and the run says so at its
+	// start and its end.
+	earlierStore []string
 }
 
 // execute is the run after the dial: what the session may see, then the file. Every
 // failure ends in fail, which says no file was written and how to recover (section 3.5).
 func (r *ringDumpRun) execute(env ringDumpEnv) int {
 	if err := r.checkDatabases(); err != nil {
+		// A ring with nothing to dump can still hold the earlier store's data: say so.
+		for _, line := range r.earlierStore {
+			_, _ = fmt.Fprintln(r.stderr, line)
+		}
 		return r.fail(env, err)
 	}
 	if err := r.writeFile(); err != nil {
@@ -367,6 +409,7 @@ func (r *ringDumpRun) printJSON(env ringDumpEnv) {
 		object.QueueMessagesLeftOut = true
 		object.QueueMessagesLeftOutText = dumpQueueLeftOutLine
 	}
+	object.EarlierStoreLeftOut = r.earlierStore
 	writeRingDumpJSON(env, object)
 }
 
@@ -384,7 +427,9 @@ func (r *ringDumpRun) checkDatabases() error {
 	sawAny := false
 	var cursor []byte
 	for {
-		page, err := r.source.ShowDatabases(r.ctx, ringclient.PageRequest{Limit: ringDumpDatabasePageSize, Cursor: cursor})
+		page, err := retryQuorum(r, func() (ringclient.DatabasePage, error) {
+			return r.source.ShowDatabases(r.ctx, ringclient.PageRequest{Limit: ringDumpDatabasePageSize, Cursor: cursor})
+		})
 		if err != nil {
 			return fmt.Errorf("listing the databases this session may see: %w", err)
 		}
@@ -439,6 +484,9 @@ func (r *ringDumpRun) writeFile() error {
 	// The statement goes before the first progress line, and the end line repeats it after
 	// the last one (section 3.1, "What the tool prints").
 	_, _ = fmt.Fprintln(r.stderr, dumpStartStatement)
+	for _, line := range r.earlierStore {
+		_, _ = fmt.Fprintln(r.stderr, line)
+	}
 	if err := r.writeHeader(); err != nil {
 		return r.abandon(err)
 	}
@@ -446,6 +494,11 @@ func (r *ringDumpRun) writeFile() error {
 	// store elements follow in the later steps of the slice (Da3 and Da4).
 	if err := r.enumerate(); err != nil {
 		return r.abandon(err)
+	}
+	if r.members != nil {
+		if err := r.members.checkUnchanged(r.ctx, "dump", r.flags.databases); err != nil {
+			return r.abandon(err)
+		}
 	}
 	if err := r.writer.Close(r.counters); err != nil {
 		return r.abandon(err)
@@ -504,4 +557,51 @@ func (r *ringDumpRun) printEnd() {
 	if r.heldQueueField {
 		_, _ = fmt.Fprintln(r.stderr, dumpQueueLeftOutLine)
 	}
+	for _, line := range r.earlierStore {
+		_, _ = fmt.Fprintln(r.stderr, line)
+	}
+}
+
+// earlierStoreLineFormat says that a member's earlier single-node store holds data this file
+// does not (review F5): the legacy opcodes write there, and no ring request reads it.
+const earlierStoreLineFormat = "Node %s also holds %s in its earlier single-node store, which programs using the earlier driver interface write to (the public Node and Python drivers, the Go driver's root package). A dump reads only the ring, so that data is NOT in this file, and no command in this release copies it into the ring. Keep that node's data directory until you have moved the data yourself."
+
+// earlierStoreUncheckedFormat is the line for a member that did not answer the question.
+const earlierStoreUncheckedFormat = "Could not ask node %s whether its earlier single-node store holds data (%s); if programs using the earlier driver interface wrote to it, that data is not in this file."
+
+// leaveLegacyStoreFlag is the flag that lets a dump leave the earlier store's data behind.
+const leaveLegacyStoreFlag = "leave-legacy-store-data"
+
+// earlierStoreRefusal is the refusal of a dump that found data in a node's earlier store: it
+// names the nodes, says the data is not carried, and names the flag that proceeds.
+func earlierStoreRefusal(holders, lines []string) string {
+	subject := "Node " + holders[0] + " holds data in its earlier single-node store, or could not say whether it does."
+	if len(holders) > 1 {
+		subject = "Nodes " + strings.Join(holders, ", ") + " hold data in their earlier single-node stores, or could not say whether they do."
+	}
+	return fmt.Sprintf("%s %s "+
+		"That data is not part of a ring dump: dump and restore do not carry it, so this file would not be a whole backup of these nodes. "+
+		"To dump the ring and leave that data behind, run the same command again with --%s, and keep the data directory of each node named here until you have moved that data yourself",
+		subject, strings.Join(lines, " "), leaveLegacyStoreFlag)
+}
+
+// earlierStoreNotes asks every member how many buckets its earlier store holds and returns one
+// line for each member where the answer is not zero or could not be had, and those members' ids.
+func earlierStoreNotes(ctx context.Context, members *ringMemberSet) (lines, holders []string) {
+	for _, member := range members.members {
+		buckets, err := member.client.EarlierStoreBuckets(ctx)
+		id := terminalSafeText(member.id)
+		switch {
+		case err != nil:
+			lines = append(lines, fmt.Sprintf(earlierStoreUncheckedFormat, id, terminalSafeText(err.Error())))
+		case buckets == 1:
+			lines = append(lines, fmt.Sprintf(earlierStoreLineFormat, id, "1 bucket"))
+		case buckets > 1:
+			lines = append(lines, fmt.Sprintf(earlierStoreLineFormat, id, formatCount(buckets)+" buckets"))
+		default:
+			continue
+		}
+		holders = append(holders, id)
+	}
+	return lines, holders
 }

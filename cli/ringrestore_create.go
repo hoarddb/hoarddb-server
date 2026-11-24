@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -46,7 +47,9 @@ func restoreFieldDecls(bucket *dumpBucket) []ringclient.FieldDecl {
 // CONFLICT, so the existing row is read to tell a repeat from a name now holding other
 // options, and only a repeat is left alone.
 func (r *ringRestoreRun) createDatabase(record *dumpDB, name string) error {
-	if _, err := r.client.CreateDatabaseWithStorage(r.ctx, name, record.RF, record.Storage); err != nil {
+	if _, err := retryQuorumCtx(r.ctx, func() (ringclient.DatabaseInfo, error) {
+		return r.createSource().CreateDatabaseWithStorage(r.ctx, name, record.RF, record.Storage)
+	}); err != nil {
 		if r.databaseHoldsRecordOptions(record, name, err) {
 			return nil
 		}
@@ -64,7 +67,9 @@ func (r *ringRestoreRun) databaseHoldsRecordOptions(record *dumpDB, name string,
 	if !errors.As(createErr, &refusal) || refusal.Code != cluster.CodeConflict {
 		return false
 	}
-	existing, err := r.client.DescribeDatabase(r.ctx, name, ringclient.PageRequest{Limit: 1})
+	existing, err := retryQuorumCtx(r.ctx, func() (ringclient.DatabaseDescription, error) {
+		return r.client.DescribeDatabase(r.ctx, name, ringclient.PageRequest{Limit: 1})
+	})
 	if err != nil {
 		return false
 	}
@@ -83,7 +88,9 @@ func (r *ringRestoreRun) createBucket(record *dumpBucket, database string) error
 	for index := range decls {
 		decls[index].Of = r.flags.restoreOf(decls[index].Of)
 	}
-	if _, err := r.client.CreateBucketExpiring(r.ctx, database, record.Name, record.ExpireField, decls); err != nil {
+	if _, err := retryQuorumCtx(r.ctx, func() (ringclient.BucketInfo, error) {
+		return r.createSource().CreateBucketExpiring(r.ctx, database, record.Name, record.ExpireField, decls)
+	}); err != nil {
 		return fmt.Errorf("creating bucket %q in database %q: %w", record.Name, database, err)
 	}
 	return nil
@@ -99,4 +106,18 @@ func restoreBlobFieldLines(bucket *dumpBucket, database string) []string {
 			terminalSafeText(database+"."+bucket.Name), terminalSafeText(fieldName))
 	}
 	return lines
+}
+
+// restoreCreateSource is the part of the ring client a restore creates with.
+type restoreCreateSource interface {
+	CreateDatabaseWithStorage(ctx context.Context, name string, rf int32, storage string) (ringclient.DatabaseInfo, error)
+	CreateBucketExpiring(ctx context.Context, database, name, expireField string, fields []ringclient.FieldDecl) (ringclient.BucketInfo, error)
+}
+
+// createSource is what creates go to: the client, unless a test replaced it.
+func (r *ringRestoreRun) createSource() restoreCreateSource {
+	if r.creator != nil {
+		return r.creator
+	}
+	return r.client
 }

@@ -459,8 +459,9 @@ const maxCatchUpStalls = 3
 // the copy needs.
 var ErrResetAndSeed = errors.New("the copy holds a tail nobody owns; the pair is reset and seeded")
 
-// ErrNoCatchUpSource is what a CatchUpSource returns when no reachable node holds a
-// position beyond this copy's own: there is nothing to catch up from.
+// ErrNoCatchUpSource is what a CatchUpSource returns when every live copy it asked answered
+// and none holds a position beyond this copy's own: there is nothing to catch up from. A copy
+// that did not answer makes it an ordinary error instead, so the pair is not marked current.
 var ErrNoCatchUpSource = errors.New("no reachable node holds more than this copy")
 
 // catchUpFlight is one catch-up in flight for a pair. It exists only while the catch-up runs:
@@ -599,7 +600,7 @@ func (r *Replicator) runCatchUp(ctx context.Context, key pairKey, cursor uint64,
 		return nil
 	}
 	if errors.Is(err, ErrNoCatchUpSource) {
-		// Nobody that can be reached holds more than this copy, so it is as current as the
+		// Every live copy answered and none holds more than this one, so it is as current as the
 		// survivors allow: the new owner of a pair whose other copies are gone opens on what
 		// it has (the loss, if any, is the contract's: write path section 7).
 		r.mu.Lock()

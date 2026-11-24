@@ -63,6 +63,10 @@ type ringServer struct {
 	manyFetch expandFetcher
 	manyOwner func(ref bucketRef, slot uint16) string
 	manyHeld  func(bytes int64)
+	// batchExecute replaces execute for the operations of a RING_BATCH; nil means execute. Tests
+	// set it to answer one operation as a node with a multi-member cluster can (an outcome the
+	// owner cannot vouch for), which a one-member test node never does.
+	batchExecute func(ctx context.Context, ref bucketRef, requestID [16]byte, req RingKeyedRequest, pos ringBatchPos) (RingReply, error)
 }
 
 // ringReplyEnvelopeBytes is the room a reply's own members (outcome, epoch, lease, position and
@@ -642,11 +646,17 @@ func (s *ringServer) writeDocument(ctx context.Context, ref bucketRef, op cluste
 	if err != nil {
 		return RingReply{}, ringNameDuplicate(ref, id, err)
 	}
+	if inserted.Held {
+		// The owner ordered nothing: answering applied here acknowledged a write that was never made (BUG-0918).
+		return RingReply{}, heldInsertRefusal(ref.db, ref.name, inserted.HoldCause)
+	}
 	if inserted.Forward {
 		return RingReply{}, fmt.Errorf("inserting into %s.%s: %w", ref.db, ref.name, ErrNoPeers)
 	}
-	copies := int32(inserted.CopiesConfirmed)
-	return RingReply{WriteOutcome: outcomeApplied, CopiesConfirmed: &copies, Position: &inserted.Pos, ID: id, Deduped: inserted.Deduped}, nil
+	// The owner's outcome, as every other class sends it: a degraded or unvouched insert is not "applied" (BUG-0919).
+	reply, err := ringWriteReply(WriteAnswer{Outcome: inserted.Outcome, CopiesConfirmed: inserted.CopiesConfirmed, Pos: inserted.Pos, Deduped: inserted.Deduped}, nil)
+	reply.ID = id
+	return reply, err
 }
 
 // ringNameDuplicate rewrites the owner's duplicate-_id_ refusal with the names this handler

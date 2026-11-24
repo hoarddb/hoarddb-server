@@ -46,17 +46,19 @@ changes in the application; the cost and the limits; and a seeded walkthrough.
 
 ## Loading the example data
 
-Every page's walkthrough uses the same seed tool, which loads one layout into a
-running server with a fixed seed, so what you see matches the page. From the
-repository's `github.com/hoarddb/hoarddb-server/` directory, with a server listening on `127.0.0.1:7433`
-and a root password in `HOARDDB_ROOT_PASSWORD`:
+Every page's walkthrough uses the same data, which `hoarddb seed` loads into a running
+server. It is generated the same way every time, so what you see matches the page.
+With a server you started yourself on this machine and its root password in
+`HOARDDB_ROOT_PASSWORD`:
 
 ```bash
-go run ./bench/scenarios -engine hoarddb -layout agent -addr 127.0.0.1:7433 -insecure
+hoarddb seed agent --insecure
 ```
 
-`-layout` takes `social`, `chat`, `ledger`, `agent`, `video` or `all`; each layout goes
-into its own database, named `scenarios_<layout>`. The tool refuses a database
-that already exists and says how to start over. `-insecure` is for a server you
-started yourself on this machine; otherwise pass `-fingerprint` with the value the
-server printed at start.
+The layout is `social`, `chat`, `ledger`, `agent`, `video` or `all`; each layout goes
+into its own database, named `scenarios_<layout>`, and `--database demo` changes the
+base name (`demo_agent`). The command refuses a database that already holds the
+layout's buckets, writes nothing, and prints the `drop bucket` lines that empty it, or
+the `--database` name to seed under instead. `--insecure` is for a server you started
+yourself on this machine; for any other server pass `--address` and `--fingerprint`
+with the value the server printed at start. `hoarddb seed --help` lists the flags.

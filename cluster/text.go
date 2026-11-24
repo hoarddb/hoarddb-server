@@ -170,7 +170,7 @@ var refusalTexts = map[Code]map[Condition]conditionText{
 		CondOwnerDown: {KindCLI, `<op> <db>.<bucket>: <owner> owns <n> of the 8192 slots this call must read and did not answer, so a partial result would look complete. Nothing was returned. Run 'nodes' to see <owner>; retry in a few seconds, or start its replacement with 'replace-node <owner> --with <owner>@<addr>'`},
 	},
 	CodeNoQuorum: {
-		CondNoQuorum: {KindCLI, `this node cannot see a majority of the cluster's <v> voters (<n> answered), so it refuses reads and writes: what it holds may be missing acknowledged writes. Run 'nodes' to see which voters are down, and retry when a majority answers`},
+		CondNoQuorum: {KindCLI, `this node cannot see a majority of the cluster's <v> voters, so it refuses reads and writes: what it holds may be missing acknowledged writes. Run 'nodes' to see which voters are down, and retry when a majority answers`},
 	},
 	CodeRFUnsupported: {
 		CondRFUnsupported: {KindCLI, `replication factor <rf> needs at least 3 voters, at least <rf> of them holding data; this cluster has <v> voters and <d> data members. Run 'nodes' to see the members, add a data node with 'join <node>@<addr>', or set 'alter database <db> { replication_factor: <n> }'`},
@@ -217,7 +217,7 @@ var refusalTexts = map[Code]map[Condition]conditionText{
 		CondClientDeclarationStale: {KindCLI, `<db>.<bucket> changed after this client read it: the client holds declaration version <d> and the table in force is version <s>, so a field may have been added or retired and this write might use the wrong ones. Nothing was written. Read the bucket again and send the write once more, which the hoardDB drivers do by themselves: 'describe bucket <bucket> in <db>' shows the fields in force`},
 	},
 	CodeBucketDropping: {
-		CondBucketDropping: {KindCLI, `bucket "<bucket>" in database "<db>" is being dropped (<n> of 8192 slots swept), and a dropping bucket accepts no reads or writes. Run 'show buckets in <db>' to watch it leave the list; the name is free when the sweep finishes and the declaration is deleted`},
+		CondBucketDropping: {KindCLI, `bucket "<bucket>" in database "<db>" is being dropped, and a dropping bucket accepts no reads or writes. Run 'show buckets in <db>' to watch it leave the list; the name is free when the sweep finishes and the declaration is deleted`},
 	},
 	CodeDeclUnavailable: {
 		CondDeclUnavailable: {KindCLI, `cannot read the declaration of bucket "<bucket>" in database "<db>": the node that stores it did not answer in time (it may be busy, or down), and this node holds no cached declaration for that name. Nothing was written. Run 'nodes': if every member is active, run 'status' on each node: Serving: ok means the read was only slow, so send the write again; a member that is not active is the one to bring back`},

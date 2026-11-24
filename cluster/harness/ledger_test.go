@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,10 +28,37 @@ func ledgerSetup(t *testing.T, rf int, opts harness.Options) *harness.Cluster {
 		t.Fatalf("creating the RF=%d database: %v", rf, err)
 	}
 	c.AwaitConverged(10 * time.Second)
-	if _, err := leader.CreateBucket(proofCtx(t), proofDB, ledgerBucket, wire.Field{Name: "name", Type: "string"}, wire.Field{Name: "seq", Type: "int"}); err != nil {
+	// A DDL fills the Raft log, and on a disk where each append costs a sync the lease rounds
+	// that follow can run late, so the next write is refused NO_QUORUM or LEASE_LAPSED by a
+	// healthy cluster (BUG-0899). The bucket's declaration insert is such a write, and it can
+	// also come back UNAVAILABLE with an outcome the refusal itself calls safe to repeat. The
+	// tests that start here are not about either, so the bucket is created on a servable
+	// cluster and sent again on those answers, and the tests start on a servable cluster.
+	c.AwaitLeases(30 * time.Second)
+	if err := ledgerRetrySetup(c, func() error {
+		_, createErr := leader.CreateBucket(proofCtx(t), proofDB, ledgerBucket, wire.Field{Name: "name", Type: "string"}, wire.Field{Name: "seq", Type: "int"})
+		return createErr
+	}); err != nil {
 		t.Fatalf("creating the bucket: %v", err)
 	}
+	c.AwaitLeases(30 * time.Second)
 	return c
+}
+
+// ledgerRetrySetup is proofRetryTransient for a setup step that is safe to repeat: it also
+// sends again on UNAVAILABLE, which a declaration insert answers when its outcome is unknown.
+func ledgerRetrySetup(c *harness.Cluster, send func() error) error {
+	var last error
+	for range 20 {
+		last = send()
+		var refusal *cluster.Error
+		unknown := errors.As(last, &refusal) && refusal.Code == cluster.CodeUnavailable
+		if last == nil || !unknown && !harness.IsTransientRefusal(last) {
+			return last
+		}
+		c.AwaitLeases(30 * time.Second)
+	}
+	return last
 }
 
 // recordingTB is a test whose failures and log lines are kept instead of failing the run,
